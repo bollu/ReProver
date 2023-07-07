@@ -311,8 +311,12 @@ python prover/evaluate.py --data-path data/leandojo_benchmark/random/  --ckpt_pa
 python prover/evaluate.py --data-path data/leandojo_benchmark/novel_premises/  --ckpt_path PATH_TO_REPROVER_CHECKPOINT --indexed-corpus-path PATH_TO_INDEXED_CORPUS --split test --num-cpus 8 --with-gpus
 ```
 
+## Loading pytorch lightning
+
+`git clone https://huggingface.co/kaiyuy/leandojo-pl-ckpts`
 
 ## Questions and Bugs
 
 * For general questions and discussions, please use [GitHub Discussions](https://github.com/lean-dojo/ReProver/discussions).  
 * To report a potential bug, please open an issue.
+
