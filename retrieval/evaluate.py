@@ -13,6 +13,8 @@ def _eval(data, preds_map) -> Tuple[float, float, float]:
     R1 = []
     R10 = []
     MRR = []
+    MAP = []
+    NDCG = []
 
     for thm in tqdm(data):
         for i, _ in enumerate(thm["traced_tactics"]):
@@ -35,11 +37,28 @@ def _eval(data, preds_map) -> Tuple[float, float, float]:
                     break
             else:
                 MRR.append(0.0)
+            
+            AP = 0
+            DCG = 0
+            for j, p in enumerate(retrieved_premises):
+                if p in all_pos_premises:
+                    AP += 1.0 / (j + 1)
+                    DCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
+
+            IDCG = 0
+            for j in range(len(all_pos_premises)):
+                IDCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
+            AP /= len(all_pos_premises)
+            MAP.append(AP)
+            NDCG.append(DCG / IDCG)
+
 
     R1 = 100 * np.mean(R1)
     R10 = 100 * np.mean(R10)
     MRR = np.mean(MRR)
-    return R1, R10, MRR
+    MAP = np.mean(MAP)
+    NDCG = np.mean(NDCG)
+    return R1, R10, MRR, MAP, NDCG
 
 
 def main() -> None:
@@ -73,8 +92,8 @@ def main() -> None:
         data_path = os.path.join(args.data_path, f"{split}.json")
         data = json.load(open(data_path))
         logger.info(f"Evaluating on {data_path}")
-        R1, R10, MRR = _eval(data, preds_map)
-        logger.info(f"R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}")
+        R1, R10, MRR, MAP, NDCG = _eval(data, preds_map)
+        logger.info(f"R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}, MAP = {MAP}, NDCG = {NDCG}")
 
 
 if __name__ == "__main__":
