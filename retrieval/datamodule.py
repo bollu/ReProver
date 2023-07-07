@@ -47,7 +47,8 @@ class RetrievalDataset(Dataset):
     def _load_data(self, data_path: str, uses_lean4: bool) -> List[Example]:
         data = []
         logger.info(f"Loading data from {data_path}")
-
+        # TODO: what is the point of building thm?
+        # ohh, thm is the input from the damn file.
         for thm in tqdm(json.load(open(data_path))):
             if thm["file_path"] in self.corpus:
                 file_path = thm["file_path"]

@@ -5,7 +5,7 @@ import pickle
 import argparse
 from loguru import logger
 
-from common import IndexedCorpus
+from commonfstar import IndexedCorpus
 from retrieval.model import PremiseRetriever
 
 

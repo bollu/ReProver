@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from typing import List, Dict, Any, Tuple, Union
 from transformers import T5EncoderModel, AutoTokenizer
 
-from common import (
+from commonfstar import (
     Premise,
     Context,
     Corpus,

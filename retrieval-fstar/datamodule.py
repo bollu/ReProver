@@ -16,7 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from lean_dojo.constants import LEAN3_DEPS_DIR, LEAN4_DEPS_DIR
 
 
-from common import Context, Corpus, Batch, Example, format_state, get_all_pos_premises
+from commonfstar import Context, Corpus, Batch, Example, format_state, get_all_pos_premises
 
 
 class RetrievalDataset(Dataset):
@@ -47,6 +47,17 @@ class RetrievalDataset(Dataset):
     def _load_data(self, data_path: str, uses_lean4: bool) -> List[Example]:
         data = []
         logger.info(f"Loading data from {data_path}")
+
+        # data_path should be a `.jsonl` file
+        data = []
+        for (i, line) in tqdm(enumerate(open(data_path))):
+            datum_raw = json.loads(line)
+            data.append({
+                ""
+                ""
+            })       
+            
+        
 
         for thm in tqdm(json.load(open(data_path))):
             if thm["file_path"] in self.corpus:

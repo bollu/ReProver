@@ -211,6 +211,8 @@ class PremiseRetriever(pl.LightningModule):
         # Evaluation & logging.
         recall = [[] for _ in range(self.num_retrieved)]
         MRR = []
+        MAP = []
+        NDCG = []
         num_with_premises = 0
         tb = self.logger.experiment
 
@@ -223,6 +225,8 @@ class PremiseRetriever(pl.LightningModule):
                 msg_retrieved = "\n\n".join(
                     [f"{j}. {p.serialize()}" for j, p in enumerate(premises)]
                 )
+                # TODO: compute MAP, NDCG by treating 'premises' as a ranked list.
+                # TODO: check what the type of `premises` even is.
                 TP = len(set(premises).intersection(all_pos_premises))
                 if len(all_pos_premises) == 0:
                     r = math.nan

@@ -6,7 +6,7 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 
-from common import Corpus
+from commonfstar import Corpus
 from retrieval.datamodule import RetrievalDataset
 
 

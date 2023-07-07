@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import multiprocessing
 from loguru import logger
-from common import Corpus
+from commonfstar import Corpus
 from lean_dojo import Pos
 from rank_bm25 import BM25Okapi
 from tokenizers import Tokenizer
@@ -18,7 +18,7 @@ from ray.util.actor_pool import ActorPool
 from lean_dojo.constants import LEAN3_DEPS_DIR
 
 
-from common import Context, format_state, get_all_pos_premises
+from commonfstar import Context, format_state, get_all_pos_premises
 
 
 def _process_theorem(
