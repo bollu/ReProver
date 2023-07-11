@@ -3,9 +3,10 @@
 import os
 from loguru import logger
 from pytorch_lightning.cli import LightningCLI
+import pretty_errors
 
-from retrieval.model import PremiseRetriever
-from retrieval.datamodule import RetrievalDataModule
+from retrievalfstar.model import PremiseRetriever
+from retrievalfstar.datamodule import RetrievalDataModule
 
 
 class CLI(LightningCLI):
@@ -15,10 +16,12 @@ class CLI(LightningCLI):
 
 
 def main() -> None:
+    pretty_errors.configure()
     logger.info(f"PID: {os.getpid()}")
     cli = CLI(PremiseRetriever, RetrievalDataModule)
     logger.info("Configuration: \n", cli.config)
 
 
 if __name__ == "__main__":
+    # import pudb; pudb.set_trace()
     main()

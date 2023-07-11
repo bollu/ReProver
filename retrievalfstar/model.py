@@ -5,12 +5,19 @@ import torch
 import pickle
 import numpy as np
 from tqdm import tqdm
-from lean_dojo import Pos
+# from lean_dojo import Pos
+from commonfstar import Pos
 from loguru import logger
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from typing import List, Dict, Any, Tuple, Union
 from transformers import T5EncoderModel, AutoTokenizer
+import pudb
+import pprint
+from retrievalfstar.datamodule import RetrievalDataModule
+
+pp = pprint.PrettyPrinter(indent=2)
+
 
 from commonfstar import (
     Premise,
@@ -26,6 +33,7 @@ from commonfstar import (
 torch.set_float32_matmul_precision("medium")
 
 
+# TODO: where is `self.trainer` even from?
 class PremiseRetriever(pl.LightningModule):
     def __init__(
         self,
@@ -132,7 +140,9 @@ class PremiseRetriever(pl.LightningModule):
             self.logger.log_hyperparams(self.hparams)
             logger.info(f"Logging to {self.trainer.log_dir}")
 
-        self.corpus = self.trainer.datamodule.corpus
+        print(self.trainer.datamodule)
+        # pudb.set_trace()
+        # self.corpus = self.trainer.datamodule.corpus
         self.corpus_embeddings = None
         self.embeddings_staled = True
 
@@ -170,18 +180,21 @@ class PremiseRetriever(pl.LightningModule):
         if not self.embeddings_staled:
             return
         logger.info("Re-indexing the retrieval corpus")
-
+        logger.info(f"trainer: {pp.pformat(self.trainer)}")
         self.corpus_embeddings = torch.zeros(
-            len(self.corpus.all_premises),
+            len(self.trainer.datamodule.all_premises),
             self.embedding_size,
             dtype=self.encoder.dtype,
             device=self.device,
         )
 
-        for i in tqdm(range(0, len(self.corpus), batch_size)):
-            batch_premises = self.corpus.all_premises[i : i + batch_size]
+        print(f"all premises length: {len(self.trainer.datamodule.all_premises)}")
+        for i in tqdm(range(0, len(self.trainer.datamodule.all_premises), batch_size)):
+            batch_premises = self.trainer.datamodule.all_premises[i : i + batch_size]
+            print(f"batch prmeises: {batch_premises}")
             tokenized_premises = self.tokenizer(
-                [p.serialize() for p in batch_premises],
+                # [p.serialize() for p in batch_premises],
+                [p for p in batch_premises], # TODO: make this `Premise` object
                 padding="longest",
                 max_length=self.max_seq_len,
                 truncation=True,
@@ -196,16 +209,60 @@ class PremiseRetriever(pl.LightningModule):
     def on_validation_start(self) -> None:
         self.reindex_corpus(self.trainer.datamodule.eval_batch_size)
 
+    @staticmethod
+    def get_nearest_premises(
+        datamodule : RetrievalDataModule,
+        premise_embeddings: torch.FloatTensor,
+        batch_context: List[Context],
+        batch_context_emb: torch.Tensor,
+        k: int,
+    ) -> Tuple[List[List[Premise]], List[List[float]]]:
+        """Perform a batch of nearest neighbour search."""
+        similarities = batch_context_emb @ premise_embeddings.t()
+        idxs_batch = similarities.argsort(dim=1, descending=True).tolist()
+        results = [[] for _ in batch_context]
+        scores = [[] for _ in batch_context]
+
+        for j, (ctx, idxs) in enumerate(zip(batch_context, idxs_batch)):
+            for i in idxs:
+                p = datamodule.all_premises[i]
+                # if p in accessible_premises:
+                if True:
+                    results[j].append(p)
+                    scores[j].append(similarities[j, i].item())
+                    if len(results[j]) >= k:
+                        break
+            else:
+                raise ValueError
+
+        return results, scores
+
+
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> None:
         """Retrieve premises and calculate metrics such as Recall@K and MRR."""
         # Retrieval.
+        # Who builds `batch`? There should be a `collate` that gets called
+        # by someone to build `batch`
         context_emb = self._encode(batch["context_ids"], batch["context_mask"])
         assert not self.embeddings_staled
-        retrieved_premises, _ = self.corpus.get_nearest_premises(
+        # TODO: this depends on `corpus` because it filters to only find those
+        # premises which are currently reachable from the current corpus.
+        # It feels perverse to include this in the code.
+        # Feels like it artificially boosts the evaluation of the model (?)
+
+        # retrieved_premises, _ = self.corpus.get_nearest_premises(
+        #     self.corpus_embeddings,
+        #     batch["context"],
+        #     context_emb,
+        #     self.num_retrieved,
+        # )
+
+        retrieved_premises, _ = PremiseRetriever.get_nearest_premises(
+            self.trainer.datamodule,
             self.corpus_embeddings,
             batch["context"],
             context_emb,
-            self.num_retrieved,
+            self.num_retrieved
         )
 
         # Evaluation & logging.
@@ -213,16 +270,21 @@ class PremiseRetriever(pl.LightningModule):
         MRR = []
         num_with_premises = 0
         tb = self.logger.experiment
-
+        pp.pprint(f"batch: {batch.keys()}")
         for i, (all_pos_premises, premises) in enumerate(
             zip_strict(batch["all_pos_premises"], retrieved_premises)
         ):
             # Only log the first example in the batch.
             if i == 0:
-                msg_gt = "\n\n".join([p.serialize() for p in all_pos_premises])
+                # msg_gt = "\n\n".join([p.serialize() for p in all_pos_premises])
+                msg_gt = "\n\n".join([p for p in all_pos_premises])
+                # msg_retrieved = "\n\n".join(
+                #     [f"{j}. {p.serialize()}" for j, p in enumerate(premises)]
+                # )
                 msg_retrieved = "\n\n".join(
-                    [f"{j}. {p.serialize()}" for j, p in enumerate(premises)]
+                    [f"{j}. {p}" for j, p in enumerate(premises)]
                 )
+
                 TP = len(set(premises).intersection(all_pos_premises))
                 if len(all_pos_premises) == 0:
                     r = math.nan

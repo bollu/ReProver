@@ -7,7 +7,7 @@ import torch
 import tempfile
 import networkx as nx
 from loguru import logger
-from lean_dojo import Pos
+# from lean_dojo import Pos
 import pytorch_lightning as pl
 from dataclasses import dataclass, field
 from pytorch_lightning.utilities.deepspeed import (
@@ -19,17 +19,137 @@ from typing import Optional, List, Dict, Any, Tuple, Generator
 from pytorch_lightning.strategies.deepspeed import DeepSpeedStrategy
 
 
+@dataclass(eq=True, unsafe_hash=True)
+class Pos:
+    """Position in source files.
+
+    We use 1-index to keep it consistent with code editors such as Visual Studio Code.
+    """
+
+    line_nb: int
+    """Line number
+    """
+
+    column_nb: int
+    """Column number
+    """
+
+    @classmethod
+    def from_str(cls, s: str) -> "Pos":
+        """Construct a :class:`Pos` object from its string representation, e.g., :code:`"(323, 1109)"`."""
+        assert s.startswith("(") and s.endswith(
+            ")"
+        ), f"Invalid string representation of a position: {s}"
+        line, column = s[1:-1].split(",")
+        line_nb = int(line)
+        column_nb = int(column)
+        return cls(line_nb, column_nb)
+
+    def __iter__(self) -> Generator[int, None, None]:
+        yield self.line_nb
+        yield self.column_nb
+
+    def __repr__(self) -> str:
+        return repr(tuple(self))
+
+    def __lt__(self, other):
+        return self.line_nb < other.line_nb or (
+            self.line_nb == other.line_nb and self.column_nb < other.column_nb
+        )
+
+    def __le__(self, other):
+        return self < other or self == other
 Example = Dict[str, Any]
 Batch = Dict[str, Any]
 
 MARK_START_SYMBOL = "<a>"
 MARK_END_SYMBOL = "</a>"
 
+# {
+#   "file_name": "Pulse.Checker.Pure.fst",
+#   "start_line": 241,
+#   "start_col": 46,
+#   "end_line": 254,
+#   "end_col": 65,
+#   "definition": "fun g e t -> let fg = Pulse.Typing.elab_env g in let re = Pulse.Elaborate.Pure.elab_term e in let rt = Pulse.Elaborate.Pure.elab_term t in let _ = Pulse.Checker.Pure.catch_all #(FStar.Tactics.Types.typing_token fg re (FStar.Pervasives.Native.Mktuple2 #FStar.Tactics.Types.tot_or_ghost #FStar.Reflection.Types.typ FStar.Tactics.Types.E_Total rt)) (fun _ -> Pulse.Checker.Pure.rtb_core_check_term_at_type (Pulse.Typing.Env.push_context g \"core_check_term_with_expected_type\" (FStar.Reflection.V2.Builtins.range_of_term rt)) fg re rt) in (let FStar.Pervasives.Native.Mktuple2 #_ #_ topt issues = _ in FStar.Tactics.V2.Builtins.log_issues issues; (match topt with | FStar.Pervasives.Native.None #_ -> let _ = Pulse.Checker.Pure.ill_typed_term e (FStar.Pervasives.Native.Some #Pulse.Syntax.Base.term t) (FStar.Pervasives.Native.None #Pulse.Syntax.Base.term) in Pulse.Typing.Env.fail #(Pulse.Typing.typing g e t) g (FStar.Pervasives.Native.Some #Pulse.Syntax.Base.range (Mkterm?.range e)) _ | FStar.Pervasives.Native.Some #_ tok -> FStar.Reflection.Typing.T_Token (Pulse.Typing.elab_env g) (Pulse.Elaborate.Pure.elab_term e) (FStar.Pervasives.Native.Mktuple2 #FStar.Tactics.Types.tot_or_ghost #FStar.Reflection.Types.typ FStar.Tactics.Types.E_Total (Pulse.Elaborate.Pure.elab_term t)) (FStar.Squash.return_squash #(FStar.Tactics.Types.typing_token (Pulse.Typing.elab_env g) (Pulse.Elaborate.Pure.elab_term e) (FStar.Pervasives.Native.Mktuple2 #FStar.Tactics.Types.tot_or_ghost #FStar.Reflection.Types.typ FStar.Tactics.Types.E_Total (Pulse.Elaborate.Pure.elab_term t))) tok)) <: Pulse.Typing.typing g e t) <: Pulse.Typing.typing g e t",
+#   "effect": "FStar.Tactics.Effect.Tac",
+#   "effect_flags": [],
+#   "hints": [
+#     {
+#       "hint_name": "Pulse.Checker.Pure.core_check_term_with_expected_type",
+#       "hint_index": 1,
+#       "fuel": 2,
+#       "ifuel": 1,
+#       "unsat_core": [
+#         "@MaxIFuel_assumption",
+#         "@query",
+#         "FStar.Tactics.Types_pretyping_05a3bdeb4a1637ac1bf12ee84facf747",
+#         "data_elim_FStar.Tactics.Result.Success",
+#         "data_typing_intro_FStar.Pervasives.Native.Mktuple2@tok",
+#         "data_typing_intro_FStar.Tactics.Types.E_Ghost@tok",
+#         "equality_tok_FStar.Tactics.Types.E_Total@tok",
+#         "equation_FStar.Reflection.Types.typ",
+#         "equation_FStar.Tactics.Types.issues",
+#         "equation_Pulse.Syntax.Base.range_singleton_trigger",
+#         "fuel_guarded_inversion_FStar.Pervasives.Native.tuple2",
+#         "fuel_guarded_inversion_FStar.Tactics.Result.__result",
+#         "fuel_guarded_inversion_Pulse.Syntax.Base.term",
+#         "function_token_typing_FStar.Reflection.Types.term",
+#         "function_token_typing_FStar.Tactics.Types.issues",
+#         "kinding_FStar.Pervasives.Native.option@tok",
+#         "kinding_FStar.Tactics.Types.tot_or_ghost@tok",
+#         "lemma_FStar.Pervasives.invertOption",
+#         "typing_FStar.Pervasives.Native.__proj__Mktuple2__item___1",
+#         "typing_FStar.Tactics.Types.typing_token",
+#         "typing_Pulse.Elaborate.Pure.elab_term",
+#         "typing_Pulse.Typing.elab_env",
+#         "typing_tok_FStar.Tactics.Types.E_Total@tok"
+#       ],
+#       "query_elapsed_time": 0
+#     }
+#   ],
+#   "mutual_with": [],
+#   "name": "Pulse.Checker.Pure.core_check_term_with_expected_type",
+#   "premises": [
+#     "Pulse.Typing.Env.env",
+#     "Pulse.Syntax.Base.term",
+#     "FStar.Pervasives.Native.option",
+#     "FStar.Tactics.Types.typing_token",
+#     "FStar.Pervasives.Native.Mktuple2",
+#     "FStar.Tactics.Types.tot_or_ghost",
+#     "FStar.Reflection.Types.typ",
+#     "FStar.Tactics.Types.E_Total",
+#     "FStar.Tactics.Types.issues",
+#     "Pulse.Typing.Env.fail",
+#     "Pulse.Typing.typing",
+#     "FStar.Pervasives.Native.Some",
+#     "Pulse.Syntax.Base.range",
+#     "Pulse.Syntax.Base.__proj__Mkterm__item__range",
+#     "Prims.string",
+#     "Pulse.Checker.Pure.ill_typed_term",
+#     "FStar.Pervasives.Native.None",
+#     "FStar.Reflection.Typing.T_Token",
+#     "Pulse.Typing.elab_env",
+#     "Pulse.Elaborate.Pure.elab_term",
+#     "FStar.Squash.return_squash",
+#     "Prims.unit",
+#     "FStar.Tactics.V2.Builtins.log_issues",
+#     "FStar.Pervasives.Native.tuple2",
+#     "Pulse.Checker.Pure.catch_all",
+#     "Pulse.Checker.Pure.rtb_core_check_term_at_type",
+#     "Pulse.Typing.Env.push_context",
+#     "FStar.Reflection.V2.Builtins.range_of_term",
+#     "FStar.Reflection.Types.term",
+#     "FStar.Reflection.Types.env"
+#   ],
+#   "proof_features": [],
+#   "type": "g: Pulse.Typing.Env.env -> e: Pulse.Syntax.Base.term -> t: Pulse.Syntax.Base.term -> FStar.Tactics.Effect.Tac (Pulse.Typing.typing g e t)",
+#   "is_lemma": false
+# }
 
 def remove_marks(s: str) -> str:
     """Remove all :code:`<a>` and :code:`</a>` from ``s``."""
     return s.replace(MARK_START_SYMBOL, "").replace(MARK_END_SYMBOL, "")
-
 
 @dataclass(unsafe_hash=True)
 class Context:
@@ -37,20 +157,25 @@ class Context:
 
     name: str
     type_ : str
-    
+    definition : str
+
     def __post_init__(self) -> None:
-        assert isinstance(self.theorem_full_name, str)
+        assert isinstance(self.name, str)
         assert isinstance(self.type_, str)
+        assert isinstance(self.definition, str)
         # assert isinstance(self.theorem_pos, Pos)
 
     def serialize(self) -> str:
         """Serialize the context into a string for Transformers."""
-        return self.name + " : " + self.type_
+        return "[n[" + self.name + "] t[" + self.type_ + "] d[" + self.definition + "]]" 
 
 
 @dataclass(unsafe_hash=True)
 class Premise:
-    """Premises are "documents" in our retrieval setup."""
+    """
+    Premises are "documents" in our retrieval setup.
+    Created by `File`.
+    """
 
     full_name: str
     """Fully qualified name.
@@ -64,8 +189,19 @@ class Premise:
     """End position of the premise's definition in the ``*.lean`` file.
     """
 
+    definition: str = field
     # code: str = field(compare=False)
     """Raw, human-written code for defining the premise.
+    """
+
+    # type_ : str
+    """
+    type signature of the premise
+    """
+
+    # premises_for_proof: List[str]
+    """
+    other premises used in the proof of this premise.
     """
 
     def __post_init__(self) -> None:
@@ -76,7 +212,7 @@ class Premise:
             and isinstance(self.end, Pos)
             and self.start <= self.end
         )
-        assert isinstance(self.code, str) and self.code != ""
+        assert isinstance(self.definition, str) and self.code != ""
 
     def serialize(self) -> str:
         """Serialize the premise into a string for Transformers."""
@@ -138,8 +274,9 @@ class File:
     @classmethod
     def from_data(cls, file_data: Dict[str, Any]) -> "File":
         """Construct a :class:`File` object from ``file_data``."""
-        # what is a file_data?
+        # `file_data` is the `jsonl`
         # TODO: read this, who even constructs a File?
+        # Answer: `Corpus` creates a `File`.
         path = file_data["path"]
         premises = []
         for p in file_data["premises"]:
@@ -168,7 +305,7 @@ class Corpus:
     premises (theorems, definitoins, etc.) that can be retrieved.
     """
 
-    transitive_dep_graph: nx.DiGraph
+    # transitive_dep_graph: nx.DiGraph
     """Transitive closure of the dependency graph among files.
     There is an edge from file X to Y iff X import Y (directly or indirectly).
     """
@@ -178,27 +315,30 @@ class Corpus:
     """
 
     def __init__(self, jsonl_path: str) -> None:
-        """Construct a :class:`Corpus` object from a ``corpus.jsonl`` data file."""
+        # """Construct a :class:`Corpus` object from a ``corpus.jsonl`` data file."""
+        """Construct a :class:`Corpus` object from a ``data.jsonl`` data file."""
         dep_graph = nx.DiGraph()
         self.all_premises = []
 
         logger.info(f"Building the corpus from {jsonl_path}")
 
-        for line in open(jsonl_path):
-            file_data = json.loads(line)
-            path = file_data["path"]
-            assert not dep_graph.has_node(path)
-            file = File.from_data(file_data)
+        # vvv below code is necessary where there is a corpus.
+        # we have but a single file.
+        # for line in open(jsonl_path):
+            # file_data = json.loads(line)
+            # file_name = file_data["file_name"]
+            # assert not dep_graph.has_node(path)
+            # file = File.from_data(file_data)
 
-            dep_graph.add_node(path, file=file)
-            self.all_premises.extend(file.premises)
+            # dep_graph.add_node(path, file=file)
+            # self.all_premises.extend(file.premises)
 
-            for p in file_data["imports"]:
-                assert dep_graph.has_node(p)
-                dep_graph.add_edge(path, p)
+            # for p in file_data["imports"]:
+                # assert dep_graph.has_node(p)
+                # dep_graph.add_edge(path, p)
 
-        assert nx.is_directed_acyclic_graph(dep_graph)
-        self.transitive_dep_graph = nx.transitive_closure_dag(dep_graph)
+        # assert nx.is_directed_acyclic_graph(dep_graph)
+        # self.transitive_dep_graph = nx.transitive_closure_dag(dep_graph)
 
         self.imported_premises_cache = {}
         self.fill_cache()

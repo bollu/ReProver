@@ -6,7 +6,7 @@ import argparse
 from loguru import logger
 
 from commonfstar import IndexedCorpus
-from retrieval.model import PremiseRetriever
+from retrievalfstar.model import PremiseRetriever
 
 
 def main() -> None:

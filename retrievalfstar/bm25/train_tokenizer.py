@@ -7,7 +7,7 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 
 from commonfstar import Corpus
-from retrieval.datamodule import RetrievalDataset
+from retrievalfstar.datamodule import RetrievalDataset
 
 
 def main() -> None:
