@@ -13,7 +13,9 @@ import torch.nn.functional as F
 from typing import List, Dict, Any, Tuple, Union
 from transformers import T5EncoderModel, AutoTokenizer
 import pudb
+import json
 import pprint
+import dataclasses
 from retrievalfstar.datamodule import RetrievalDataModule
 
 pp = pprint.PrettyPrinter(indent=2)
@@ -188,7 +190,7 @@ class PremiseRetriever(pl.LightningModule):
             device=self.device,
         )
 
-        print(f"all premises length: {len(self.trainer.datamodule.all_premises)}")
+        print(f"all premises length: '{len(self.trainer.datamodule.all_premises)}'")
         for i in tqdm(range(0, len(self.trainer.datamodule.all_premises), batch_size)):
             batch_premises = self.trainer.datamodule.all_premises[i : i + batch_size]
             print(f"batch prmeises: {batch_premises}")
@@ -333,67 +335,148 @@ class PremiseRetriever(pl.LightningModule):
     ##############
 
     def on_predict_start(self) -> None:
-        self.corpus = self.trainer.datamodule.corpus
+        # self.corpus = self.trainer.datamodule.corpus
         self.corpus_embeddings = None
         self.embeddings_staled = True
+        logger.info(f"Evaluating on {self.trainer.datamodule.data_path}")
         self.reindex_corpus(self.trainer.datamodule.eval_batch_size)
         self.predict_step_outputs = []
+        self.R1s = []
+        self.R10s = []
+        self.RRs = []
+        self.APs = []
+        self.NDCGs = []
 
     def predict_step(self, batch: Dict[str, Any], _):
-        context_emb = self._encode(batch["context_ids"], batch["context_mask"])
+        # recall that everything is batched
+        context_emb_batched = self._encode(batch["context_ids"], batch["context_mask"])
         assert not self.embeddings_staled
-        retrieved_premises, scores = self.corpus.get_nearest_premises(
+        # logger.info(f"batch.keys(): '{batch.keys()}', corpus embeddings: '{self.corpus_embeddings.shape}', num_retrieved: '{self.num_retrieved}'")
+    
+        assert self.corpus_embeddings is not None
+        # ALL_POS_PREMISES: BATCHSIZE x <ragged>
+        all_pos_premises_batched = batch["all_pos_premises"]
+        # RETRIEVED_PREMISES: BATCHSIZE x NUM_RETRIEVED
+        retrieved_premises_batched, scores_batched = PremiseRetriever.get_nearest_premises(
+            self.trainer.datamodule,
             self.corpus_embeddings,
             batch["context"],
-            context_emb,
+            context_emb_batched,
             self.num_retrieved,
         )
 
-        for (
-            url,
-            commit,
-            file_path,
-            full_name,
-            start,
-            tactic_idx,
-            ctx,
-            pos_premises,
-            premises,
-            s,
-        ) in zip_strict(
-            batch["url"],
-            batch["commit"],
-            batch["file_path"],
-            batch["full_name"],
-            batch["start"],
-            batch["tactic_idx"],
-            batch["context"],
-            batch["all_pos_premises"],
-            retrieved_premises,
-            scores,
-        ):
-            self.predict_step_outputs.append(
-                {
-                    "url": url,
-                    "commit": commit,
-                    "file_path": file_path,
-                    "full_name": full_name,
-                    "start": start,
-                    "tactic_idx": tactic_idx,
-                    "context": ctx,
-                    "all_pos_premises": pos_premises,
-                    "retrieved_premises": premises,
-                    "scores": s,
-                }
-            )
+        for bix in range(len(all_pos_premises_batched)):
+            all_pos_premises = all_pos_premises_batched[bix]
+            all_pos_premises_set = set(all_pos_premises)
+            retrieved_premises = retrieved_premises_batched[bix]
+
+            TP1 = retrieved_premises[0] in all_pos_premises
+            R1 = float(TP1) / len(all_pos_premises)
+            self.R1s.append(R1)
+            TP10 = len(all_pos_premises_set.intersection(retrieved_premises[:10]))
+            R10 = float(TP10) / len(all_pos_premises)
+            self.R10s.append(R10)
+
+            RR = 0
+            for j, p in enumerate(retrieved_premises):
+                if p in all_pos_premises:
+                    RR = (1.0 / (j + 1))
+                    break
+            self.RRs.append(RR)
+
+            AP = 0
+            DCG = 0
+            for j, p in enumerate(retrieved_premises):
+                if p in all_pos_premises:
+                    AP += 1.0 / (j + 1)
+                    DCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
+            AP /= len(all_pos_premises)
+            self.APs.append(AP)
+
+            IDCG = 0
+            for j in range(len(all_pos_premises)):
+                IDCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
+            NDCG = DCG / IDCG
+            self.NDCGs.append(NDCG)
+
+            self.predict_step_outputs.append({
+                "context": dataclasses.asdict(batch["context"][bix]),
+                "all_pos_premises": all_pos_premises,
+                "retrieved_premises": retrieved_premises,
+                "scores": scores_batched[bix],
+                "R1": R1,
+                "R10": R10,
+                "RR": RR,
+                "AP": AP,
+                "NDCG": NDCG,
+            })
+
+        # pp.pprint(f"batch keys: '{batch.keys()}'")
+
+        # for (
+        #     # url,
+        #     # commit,
+        #     # file_path,
+        #     # full_name,
+        #     # start,
+        #     # tactic_idx,
+        #     ctx,
+        #     pos_premises,
+        #     premises,
+        #     s,
+        # ) in zip_strict(
+        #     # batch["url"],
+        #     # batch["commit"],
+        #     # batch["file_path"],
+        #     # batch["full_name"],
+        #     # batch["start"],
+        #     # batch["tactic_idx"],
+        #     batch["context"],
+        #     batch["all_pos_premises"],
+        #     retrieved_premises,
+        #     scores,
+        # ):
+        #     self.predict_step_outputs.append(
+        #         {
+        #             # "url": url,
+        #             # "commit": commit,
+        #             # "file_path": file_path,
+        #             # "full_name": full_name,
+        #             # "start": start,
+        #             # "tactic_idx": tactic_idx,
+        #             "context": ctx,
+        #             "all_pos_premises": pos_premises,
+        #             "retrieved_premises": premises,
+        #             "scores": s,
+        #         }
+        #     )
 
     def on_predict_epoch_end(self) -> None:
+        R1 = np.mean(self.R1s)
+        R10 = np.mean(self.R10s)
+        MRR = np.mean(self.RRs)
+        MAP = np.mean(self.APs)
+        NDCG = np.mean(self.NDCGs)
+        logger.info(f"R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}, MAP = {MAP}, NDCG = {NDCG}")
+
         if self.trainer.log_dir is not None:
-            path = os.path.join(self.trainer.log_dir, "predictions.pickle")
-            with open(path, "wb") as oup:
-                pickle.dump(self.predict_step_outputs, oup)
+            path = os.path.join(self.trainer.log_dir, "predictions.json")
+            with open(path, "w") as of:
+                json.dump({
+                    "predict_steps": self.predict_step_outputs,
+                    "R1": R1,
+                    "R10": R10,
+                    "MRR": MRR,
+                    "MAP": MAP,
+                    "NDCG": NDCG,
+                }, of, indent=2)
             logger.info(f"Retrieval predictions saved to {path}")
 
+        self.R1s.clear()
+        self.R10s.clear()
+        self.RRs.clear()
+        self.APs.clear()
+        self.NDCGs.clear()
         self.predict_step_outputs.clear()
 
     def retrieve(
@@ -427,8 +510,16 @@ class PremiseRetriever(pl.LightningModule):
             self.corpus_embeddings = self.corpus_embeddings.to(context_emb.device)
         if self.corpus_embeddings.dtype != context_emb.dtype:
             self.corpus_embeddings = self.corpus_embeddings.to(context_emb.dtype)
+        
+        # retrieved_premises, scores = self.corpus.get_nearest_premises(
+        #     self.corpus_embeddings,
+        #     ctx,
+        #     context_emb,
+        #     k,
+        # )
 
-        retrieved_premises, scores = self.corpus.get_nearest_premises(
+        retrieved_premises, scores = PremiseRetriever.get_nearest_premises(
+            self.trainer.datamodule,
             self.corpus_embeddings,
             ctx,
             context_emb,

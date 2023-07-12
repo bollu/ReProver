@@ -143,12 +143,13 @@ class RetrievalDataset(Dataset):
             context = Context(name=datum["name"],
                 type_=datum["type"],
                 definition=datum["definition"])
+            # all premises that are *used* in the tactic.
             all_pos_premises = datum["premises"]
             for pos_premise in all_pos_premises:
                 data.append({
                     "context": context,
                     "pos_premise": pos_premise, # TODO: create an actual Premise object? smh.
-                    "all_pos_premises": all_pos_premises, # all of the +ve premises this premise co-occurs with in this context.
+                    "all_pos_premises": all_pos_premises, # all of the premises that this premise co-occurs with in this context.
                 })       
                     
         # for line in tqdm(open(data_path, "r")):
@@ -289,6 +290,7 @@ class RetrievalDataset(Dataset):
                 for kpos in range(batch_size):
                     # pos_premise_k = examples[k]["pos_premise"]
                     label[j, kpos] = 1.0
+                
                 for kneg in range (batch_size * self.num_negatives):
                     (bix, nix) = divmod(kneg, self.num_negatives) # kneg // self.num_negatives, kneg % self.num_negatives
                     # should use `modrem` ?
@@ -388,11 +390,15 @@ class RetrievalDataModule(pl.LightningDataModule):
             self.all_premises.update(self.ds_val.all_premises)
 
         if stage in (None, "fit", "predict"):
+            # TODO: not sure this is right. Actually only take whatever the user asks us to take?
+            # Actually, we should probably only take 'test', as `validate` is called per epoch to
+            # decide on the best model.
             self.ds_pred = RetrievalDataset(
-                [
-                    os.path.join(self.data_path, f"{split}.jsonl")
-                    for split in ("train", "validate", "test")
-                ],
+                [os.path.join(self.data_path, "test.jsonl")],
+                # [
+                #     os.path.join(self.data_path, f"{split}.jsonl")
+                #     for split in ("train", "validate", "test")
+                # ],
                 # self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,

@@ -167,10 +167,8 @@ class RetrievalDataset(Dataset):
             batch["pos_premise"] = pos_premise
             batch["pos_premise_ids"] = tokenized_pos_premise.input_ids
             batch["pos_premise_mask"] = tokenized_pos_premise.attention_mask
-
             batch_size = len(examples)
             label = torch.zeros(batch_size, batch_size * (1 + self.num_negatives))
-
             # Check if one's negative is another's positive
             for j in range(batch_size):
                 all_pos_premises = examples[j]["all_pos_premises"]
@@ -182,12 +180,10 @@ class RetrievalDataset(Dataset):
                             k // batch_size - 1
                         ]
                     label[j, k] = float(pos_premise_k in all_pos_premises)
-
             batch["label"] = label
             batch["neg_premises"] = []
             batch["neg_premises_ids"] = []
             batch["neg_premises_mask"] = []
-
             for i in range(self.num_negatives):
                 neg_premise = [ex["neg_premises"][i] for ex in examples]
                 tokenized_neg_premise = self.tokenizer(

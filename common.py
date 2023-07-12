@@ -306,7 +306,6 @@ class Corpus:
         idxs_batch = similarities.argsort(dim=1, descending=True).tolist()
         results = [[] for _ in batch_context]
         scores = [[] for _ in batch_context]
-
         for j, (ctx, idxs) in enumerate(zip(batch_context, idxs_batch)):
             accessible_premises = self.get_accessible_premises(
                 ctx.path, ctx.theorem_pos
