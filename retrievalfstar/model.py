@@ -234,9 +234,6 @@ class PremiseRetriever(pl.LightningModule):
                     scores[j].append(similarities[j, i].item())
                     if len(results[j]) >= k:
                         break
-            else:
-                raise ValueError
-
         return results, scores
 
 
@@ -342,6 +339,8 @@ class PremiseRetriever(pl.LightningModule):
         self.reindex_corpus(self.trainer.datamodule.eval_batch_size)
         self.predict_step_outputs = []
         self.R1s = []
+        self.Ks_at_full_recall = []
+        self.Ks_percent_at_full_recall = []
         self.R10s = []
         self.RRs = []
         self.APs = []
@@ -384,20 +383,48 @@ class PremiseRetriever(pl.LightningModule):
                     break
             self.RRs.append(RR)
 
+            # AP = integral_0^1 P(r) dr
+            # change of variables into k 
+            # let rel(k) = 1 if retrieved_premises[k] in all_pos_premises else 0
+            # let s(k) = sum_{j=0}^k rel(j)
+            # p(k) = s(k) / k
+            # r = s(k) / |all_pos_premises|
+            # dk = 1
+            # dr = (r(k + dk) -  r(k)) / dk 
+            #    = (r(k + 1) - r(k)) / 1
+            #    = rel(k+1) / |all_pos_premises|
+            # AP = integral_0^1 P(r) dr
+            #    = sum_0^N P(r(k)) dr(k)
+            #    = sum_0^N p(k) rel(k) / |all_pos_premises|
             AP = 0
             DCG = 0
+            IDCG = 0
+            
+            K_at_full_recall = np.nan # How to correctly initialize?
+            K_percent_at_full_recall = np.nan
+            ncorrect_at_j = 0
+
             for j, p in enumerate(retrieved_premises):
-                if p in all_pos_premises:
-                    AP += 1.0 / (j + 1)
-                    DCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
+                discount = np.log2(j + 1) if j > 0 else 1
+                if j < len(all_pos_premises):
+                    IDCG += 1.0 / discount          
+
+                rel_at_j = int(p in all_pos_premises)
+                ncorrect_at_j += rel_at_j
+
+                if ncorrect_at_j == len(all_pos_premises):
+                    K_at_full_recall = j + 1
+                    K_percent_at_full_recall = K_at_full_recall / len(retrieved_premises)
+                DCG += rel_at_j / discount
+                p_at_j = ncorrect_at_j / (j + 1)
+                AP += p_at_j * rel_at_j
+ 
             AP /= len(all_pos_premises)
             self.APs.append(AP)
-
-            IDCG = 0
-            for j in range(len(all_pos_premises)):
-                IDCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
             NDCG = DCG / IDCG
             self.NDCGs.append(NDCG)
+            self.Ks_at_full_recall.append(K_at_full_recall)
+            self.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
 
             self.predict_step_outputs.append({
                 "context": dataclasses.asdict(batch["context"][bix]),
@@ -409,6 +436,8 @@ class PremiseRetriever(pl.LightningModule):
                 "RR": RR,
                 "AP": AP,
                 "NDCG": NDCG,
+                "K_at_full_recall": K_at_full_recall,
+                "K_percent_at_full_recall": K_percent_at_full_recall,
             })
 
         # pp.pprint(f"batch keys: '{batch.keys()}'")
@@ -457,7 +486,12 @@ class PremiseRetriever(pl.LightningModule):
         MRR = np.mean(self.RRs)
         MAP = np.mean(self.APs)
         NDCG = np.mean(self.NDCGs)
+        K_at_full_recall = np.nanmean(self.Ks_at_full_recall)
+        K_percent_at_full_recall = np.nanmean(self.Ks_percent_at_full_recall)
+        num_no_full_recall = np.count_nonzero(np.isnan(self.Ks_at_full_recall))
+        percent_no_full_recall = num_no_full_recall / len(self.Ks_at_full_recall)
         logger.info(f"R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}, MAP = {MAP}, NDCG = {NDCG}")
+        logger.info(f"K for full recall = {K_at_full_recall}, %K for full recall = {K_percent_at_full_recall}, #no full recall = {num_no_full_recall}, %no full recall: {percent_no_full_recall}")
 
         if self.trainer.log_dir is not None:
             path = os.path.join(self.trainer.log_dir, "predictions.json")
@@ -469,6 +503,10 @@ class PremiseRetriever(pl.LightningModule):
                     "MRR": MRR,
                     "MAP": MAP,
                     "NDCG": NDCG,
+                    "K_at_full_recall": K_at_full_recall,
+                    "K_percent_at_full_recall": K_percent_at_full_recall,
+                    "num_no_full_recall": num_no_full_recall,
+                    "percent_no_full_recall": percent_no_full_recall,
                 }, of, indent=2)
             logger.info(f"Retrieval predictions saved to {path}")
 

@@ -257,7 +257,7 @@ class RetrievalDataset(Dataset):
         # Tokenize the context.
         context = [ex["context"] for ex in examples]
         tokenized_context = self.tokenizer(
-            [c.serialize() for c in context],
+            [c.serialize_name_type() for c in context],
             padding="longest",
             max_length=self.max_seq_len,
             truncation=True,

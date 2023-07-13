@@ -165,7 +165,11 @@ class Context:
         assert isinstance(self.definition, str)
         # assert isinstance(self.theorem_pos, Pos)
 
-    def serialize(self) -> str:
+    def serialize_name_type(self) -> str:
+        """Serialize the context into a string for Transformers."""
+        return "[n[" + self.name + "] t[" + self.type_ + "]]"
+
+    def serialize_name_type_defn(self) -> str:
         """Serialize the context into a string for Transformers."""
         return "[n[" + self.name + "] t[" + self.type_ + "] d[" + self.definition + "]]" 
 
