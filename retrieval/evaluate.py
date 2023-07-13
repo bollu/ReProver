@@ -40,9 +40,11 @@ def _eval(data, preds_map) -> Tuple[float, float, float]:
             
             AP = 0
             DCG = 0
+            ncorrect = 0
             for j, p in enumerate(retrieved_premises):
                 if p in all_pos_premises:
-                    AP += 1.0 / (j + 1)
+                    ncorrect += 1
+                    AP += ncorrect / (j + 1)
                     DCG += 1.0 / (np.log2(j + 1) if j > 0 else 1)
 
             IDCG = 0
