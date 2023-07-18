@@ -1,5 +1,7 @@
 LATEST_LIGHTING_PATH :=  $(ls -lt lightning_logs/ | head -n 1)
 
+# activate_conda:
+# 	conda activate ReProver
 fit_fstar:
 	CONTAINER=native python3 -m retrievalfstar.main  fit --config ./retrievalfstar/confs/cli_random.yaml 
 
@@ -25,6 +27,4 @@ evaluate_reprover:
 	CONTAINER=native python3 -m retrieval.evaluate \
 		  --data-path data/leandojo_benchmark/random \
 		  --preds-file PATH_TO_PREDICTIONS_PICKLE
-
-
 

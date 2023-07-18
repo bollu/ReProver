@@ -142,7 +142,7 @@ class PremiseRetriever(pl.LightningModule):
             self.logger.log_hyperparams(self.hparams)
             logger.info(f"Logging to {self.trainer.log_dir}")
 
-        print(self.trainer.datamodule)
+        # print(self.trainer.datamodule)
         # pudb.set_trace()
         # self.corpus = self.trainer.datamodule.corpus
         self.corpus_embeddings = None
@@ -193,7 +193,7 @@ class PremiseRetriever(pl.LightningModule):
         print(f"all premises length: '{len(self.trainer.datamodule.all_premises)}'")
         for i in tqdm(range(0, len(self.trainer.datamodule.all_premises), batch_size)):
             batch_premises = self.trainer.datamodule.all_premises[i : i + batch_size]
-            print(f"batch prmeises: {batch_premises}")
+            # print(f"batch prmeises: {batch_premises}")
             tokenized_premises = self.tokenizer(
                 # [p.serialize() for p in batch_premises],
                 [p for p in batch_premises], # TODO: make this `Premise` object
@@ -269,7 +269,7 @@ class PremiseRetriever(pl.LightningModule):
         MRR = []
         num_with_premises = 0
         tb = self.logger.experiment
-        pp.pprint(f"batch: {batch.keys()}")
+        # pp.pprint(f"batch: {batch.keys()}")
         for i, (all_pos_premises, premises) in enumerate(
             zip_strict(batch["all_pos_premises"], retrieved_premises)
         ):

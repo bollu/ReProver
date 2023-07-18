@@ -11,11 +11,11 @@ trainer:
       cpu_checkpointing: false
   gradient_clip_val: 1.0
   max_steps: 500000
-  logger:
-    class_path: pytorch_lightning.loggers.WandbLogger
-    name: "fstar-retrieval-random"
-    project: "premise-selection"
-    log_model: True
+  # logger:
+  #   class_path: lightning.pytorch.loggers.WandbLogger
+  #   name: "fstar-premise-retrieval-random"
+  #   project: "premise-selection"
+  #   log_model: True
   callbacks:
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
       init_args: 

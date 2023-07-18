@@ -20,7 +20,7 @@ def _eval(data, preds_map) -> Tuple[float, float, float]:
     # they evaluate for each piece in the data
     for line in tqdm(data): # data is a jsonl file.
         tnhm = json.loads(line)
-        print(f"thm keys: {thm.keys()}")
+        # print(f"thm keys: {thm.keys()}")
         # for 
         # for i, _ in enumerate(thm["traced_tactics"]):
         #     pred = preds_map[
@@ -89,10 +89,10 @@ def main() -> None:
     preds = pickle.load(open(args.preds_file, "rb"))
     # dict_keys(['context', 'all_pos_premises', 'retrieved_premises', 'scores'])
     ps = set()
-    for p in preds:
-        print(p["context"].name)
-        ps.add(p["context"].name)
-    print(f"all predictions: {ps}")
+    # for p in preds:
+    #     print(p["context"].name)
+    #     ps.add(p["context"].name)
+    # print(f"all predictions: {ps}")
 
     preds_map = {
         p["context"].name : p
