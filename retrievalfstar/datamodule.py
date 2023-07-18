@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from torch.utils.data import Dataset, DataLoader
 from lean_dojo.constants import LEAN3_DEPS_DIR, LEAN4_DEPS_DIR
 from typing import *
+import pathlib
 import pprint
 
 pp = pprint.PrettyPrinter(indent=2)
@@ -131,22 +132,31 @@ class RetrievalDataset(Dataset):
         for datum in tqdm(self.data):
             self.all_premises.add(datum["pos_premise"])
 
-    def _load_data(self, data_path: str) -> List[Example]:
-        data = []
-        logger.info(f"Loading data from {data_path}")
+    @staticmethod
+    def load_json_or_jsonl(path : str) -> List[Dict[str, Any]]:
+        ext = pathlib.Path(path).suffix
+        if ".json" == ext:
+            return json.load(open(path))
+        else:
+            assert ".jsonl" == ext
+            return [json.loads(line) for line in open(path)]
 
-        # data_path should be a `.jsonl` file
-        for (i, line) in tqdm(enumerate(open(data_path))):
-            datum = json.loads(line)
+    def _load_data(self, data_path: str) -> List[Example]:
+        out_data = []
+        logger.info(f"Loading data from '{data_path}'")
+        in_data = RetrievalDataset.load_json_or_jsonl(data_path)
+        for (i, datum) in tqdm(enumerate(in_data)):
             if i == 0:
                 print(f"loading datum with keys '{datum.keys()}'")
+            print(f"loading '{i}'th data from '{data_path}'. keys: '{datum.keys()}'")
             context = Context(name=datum["name"],
                 type_=datum["type"],
                 definition=datum["definition"])
             # all premises that are *used* in the tactic.
-            all_pos_premises = datum["premises"]
+            # all_pos_premises = datum["premises"]
+            all_pos_premises = datum["only_def_premises"]
             for pos_premise in all_pos_premises:
-                data.append({
+                out_data.append({
                     "context": context,
                     "pos_premise": pos_premise, # TODO: create an actual Premise object? smh.
                     "all_pos_premises": all_pos_premises, # all of the premises that this premise co-occurs with in this context.
@@ -204,8 +214,8 @@ class RetrievalDataset(Dataset):
         #                 }
         #             )
 
-        logger.info(f"Loaded {len(data)} examples.")
-        return data
+        logger.info(f"Loaded '{len(out_data)}' examples.")
+        return out_data
 
     def __len__(self) -> int:
         return len(self.data)
@@ -365,7 +375,7 @@ class RetrievalDataModule(pl.LightningDataModule):
         self.all_premises = set()
         if stage in (None, "fit"):
             self.ds_train = RetrievalDataset(
-                [os.path.join(self.data_path, "train.jsonl")],
+                [os.path.join(self.data_path, "train.json")],
                 # self.uses_lean4,
                 # self.corpus,
                 self.num_negatives,
@@ -378,7 +388,7 @@ class RetrievalDataModule(pl.LightningDataModule):
 
         if stage in (None, "fit", "validate"):
             self.ds_val = RetrievalDataset(
-                [os.path.join(self.data_path, "validate.jsonl")],
+                [os.path.join(self.data_path, "validate.json")],
                 # self.uses_lean4,
                 # self.corpus,
                 self.num_negatives,
@@ -394,7 +404,7 @@ class RetrievalDataModule(pl.LightningDataModule):
             # Actually, we should probably only take 'test', as `validate` is called per epoch to
             # decide on the best model.
             self.ds_pred = RetrievalDataset(
-                [os.path.join(self.data_path, "test.jsonl")],
+                [os.path.join(self.data_path, "test.json")],
                 # [
                 #     os.path.join(self.data_path, f"{split}.jsonl")
                 #     for split in ("train", "validate", "test")
