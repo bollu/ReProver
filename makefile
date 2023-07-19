@@ -7,8 +7,8 @@ fit_fstar:
 
 predict_fstar_last:
 	CONTAINER=native python3 -m retrievalfstar.main predict  \
-		--config lightning_logs/version_44/config.yaml \
-		--ckpt_path lightning_logs/version_44/checkpoints/last.ckpt/ 
+		--config lightning_logs/$LATEST_LIGHTNING_PATH/config.yaml \
+		--ckpt_path lightning_logs/$LATEST_LIGHTNING_PATH/checkpoints/last.ckpt/ 
 	
 # evaluate_fstar:
 # 	@echo "running evaluate on checkpoint $(LATEST_LIGHTNING_PATH)"

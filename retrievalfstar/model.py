@@ -17,6 +17,7 @@ import json
 import pprint
 import dataclasses
 from retrievalfstar.datamodule import RetrievalDataModule
+from dataclasses import dataclass, field
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -31,6 +32,17 @@ from commonfstar import (
     cpu_checkpointing_enabled,
 )
 
+
+@dataclass
+class TestStatisticsCollator:
+    R1s : List[int] = field(default_factory=list)
+    test_step_outputs : List[Dict[str, Any]] = field(default_factory=list)
+    Ks_at_full_recall : List[int] = field(default_factory=list)
+    Ks_percent_at_full_recall : List[int] = field(default_factory=list)
+    R10s : List[int] = field(default_factory=list)
+    RRs : List[int]= field(default_factory=list)
+    APs : List[int] = field(default_factory=list)
+    NDCGs : List[int] = field(default_factory=list)
 
 torch.set_float32_matmul_precision("medium")
 
@@ -328,25 +340,21 @@ class PremiseRetriever(pl.LightningModule):
         )
 
     ##############
-    # Prediction #
+    # Testing    #
     ##############
 
-    def on_predict_start(self) -> None:
+    def on_test_start(self) -> None:
         # self.corpus = self.trainer.datamodule.corpus
         self.corpus_embeddings = None
         self.embeddings_staled = True
         logger.info(f"Evaluating on {self.trainer.datamodule.data_path}")
         self.reindex_corpus(self.trainer.datamodule.eval_batch_size)
-        self.predict_step_outputs = []
-        self.R1s = []
-        self.Ks_at_full_recall = []
-        self.Ks_percent_at_full_recall = []
-        self.R10s = []
-        self.RRs = []
-        self.APs = []
-        self.NDCGs = []
+        self.stats = dict()
 
-    def predict_step(self, batch: Dict[str, Any], _):
+    def test_step(self, batch: Dict[str, Any], batch_idx : int, dataloader_idx : int):
+        if dataloader_idx not in self.stats:
+            self.stats[dataloader_idx] = TestStatisticsCollator()
+        collator = self.stats[dataloader_idx]
         # recall that everything is batched
         context_emb_batched = self._encode(batch["context_ids"], batch["context_mask"])
         assert not self.embeddings_staled
@@ -371,17 +379,17 @@ class PremiseRetriever(pl.LightningModule):
 
             TP1 = retrieved_premises[0] in all_pos_premises
             R1 = float(TP1) / len(all_pos_premises)
-            self.R1s.append(R1)
+            collator.R1s.append(R1)
             TP10 = len(all_pos_premises_set.intersection(retrieved_premises[:10]))
             R10 = float(TP10) / len(all_pos_premises)
-            self.R10s.append(R10)
+            collator.R10s.append(R10)
 
             RR = 0
             for j, p in enumerate(retrieved_premises):
                 if p in all_pos_premises:
                     RR = (1.0 / (j + 1))
                     break
-            self.RRs.append(RR)
+            collator.RRs.append(RR)
 
             # AP = integral_0^1 P(r) dr
             # change of variables into k 
@@ -420,13 +428,13 @@ class PremiseRetriever(pl.LightningModule):
                 AP += p_at_j * rel_at_j
  
             AP /= len(all_pos_premises)
-            self.APs.append(AP)
+            collator.APs.append(AP)
             NDCG = DCG / IDCG
-            self.NDCGs.append(NDCG)
-            self.Ks_at_full_recall.append(K_at_full_recall)
-            self.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
+            collator.NDCGs.append(NDCG)
+            collator.Ks_at_full_recall.append(K_at_full_recall)
+            collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
 
-            self.predict_step_outputs.append({
+            collator.test_step_outputs.append({
                 "context": dataclasses.asdict(batch["context"][bix]),
                 "all_pos_premises": all_pos_premises,
                 "retrieved_premises": retrieved_premises,
@@ -465,7 +473,7 @@ class PremiseRetriever(pl.LightningModule):
         #     retrieved_premises,
         #     scores,
         # ):
-        #     self.predict_step_outputs.append(
+        #     self.test_step_outputs.append(
         #         {
         #             # "url": url,
         #             # "commit": commit,
@@ -480,42 +488,38 @@ class PremiseRetriever(pl.LightningModule):
         #         }
         #     )
 
-    def on_predict_epoch_end(self) -> None:
-        R1 = np.mean(self.R1s)
-        R10 = np.mean(self.R10s)
-        MRR = np.mean(self.RRs)
-        MAP = np.mean(self.APs)
-        NDCG = np.mean(self.NDCGs)
-        K_at_full_recall = np.nanmean(self.Ks_at_full_recall)
-        K_percent_at_full_recall = np.nanmean(self.Ks_percent_at_full_recall)
-        num_no_full_recall = np.count_nonzero(np.isnan(self.Ks_at_full_recall))
-        percent_no_full_recall = num_no_full_recall / len(self.Ks_at_full_recall)
-        logger.info(f"R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}, MAP = {MAP}, NDCG = {NDCG}")
-        logger.info(f"K for full recall = {K_at_full_recall}, %K for full recall = {K_percent_at_full_recall}, #no full recall = {num_no_full_recall}, %no full recall: {percent_no_full_recall}")
+    def on_test_epoch_end(self) -> None:
+        for ix in self.stats.keys():
+            collator = self.stats[ix]
+            R1 = np.mean(collator.R1s)
+            R10 = np.mean(collator.R10s)
+            MRR = np.mean(collator.RRs)
+            MAP = np.mean(collator.APs)
+            NDCG = np.mean(collator.NDCGs)
+            K_at_full_recall = np.nanmean(collator.Ks_at_full_recall)
+            K_percent_at_full_recall = np.nanmean(collator.Ks_percent_at_full_recall)
+            num_no_full_recall = np.count_nonzero(np.isnan(collator.Ks_at_full_recall))
+            percent_no_full_recall = num_no_full_recall / len(collator.Ks_at_full_recall)
+            name = ["train", "val", "test"][ix] # TODO: pick this up from the data loader.
+            logger.info(f"name={name} R@1 = {R1} %, R@10 = {R10} %, MRR = {MRR}, MAP = {MAP}, NDCG = {NDCG}")
+            logger.info(f"  K for full recall = {K_at_full_recall}, %K for full recall = {K_percent_at_full_recall}, #no full recall = {num_no_full_recall}, %no full recall: {percent_no_full_recall}")
 
-        if self.trainer.log_dir is not None:
-            path = os.path.join(self.trainer.log_dir, "predictions.json")
-            with open(path, "w") as of:
-                json.dump({
-                    "predict_steps": self.predict_step_outputs,
-                    "R1": R1,
-                    "R10": R10,
-                    "MRR": MRR,
-                    "MAP": MAP,
-                    "NDCG": NDCG,
-                    "K_at_full_recall": K_at_full_recall,
-                    "K_percent_at_full_recall": K_percent_at_full_recall,
-                    "num_no_full_recall": num_no_full_recall,
-                    "percent_no_full_recall": percent_no_full_recall,
-                }, of, indent=2)
-            logger.info(f"Retrieval predictions saved to {path}")
-
-        self.R1s.clear()
-        self.R10s.clear()
-        self.RRs.clear()
-        self.APs.clear()
-        self.NDCGs.clear()
-        self.predict_step_outputs.clear()
+            if self.trainer.log_dir is not None:
+                path = os.path.join(self.trainer.log_dir, f"test_output_{name}.json")
+                with open(path, "w") as of:
+                    json.dump({
+                        "predict_steps": collator.test_step_outputs,
+                        "R1": R1,
+                        "R10": R10,
+                        "MRR": MRR,
+                        "MAP": MAP,
+                        "NDCG": NDCG,
+                        "K_at_full_recall": K_at_full_recall,
+                        "K_percent_at_full_recall": K_percent_at_full_recall,
+                        "num_no_full_recall": num_no_full_recall,
+                        "percent_no_full_recall": percent_no_full_recall,
+                    }, of, indent=2)
+                logger.info(f"Retrieval predictions saved to {path}")
 
     def retrieve(
         self,

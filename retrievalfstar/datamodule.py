@@ -373,7 +373,7 @@ class RetrievalDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         self.all_premises = set()
-        if stage in (None, "fit"):
+        if stage in (None, "fit", "test"):
             self.ds_train = RetrievalDataset(
                 [os.path.join(self.data_path, "train.json")],
                 # self.uses_lean4,
@@ -386,7 +386,7 @@ class RetrievalDataModule(pl.LightningDataModule):
             )
             self.all_premises.update(self.ds_train.all_premises)
 
-        if stage in (None, "fit", "validate"):
+        if stage in (None, "fit", "validate", "test"):
             self.ds_val = RetrievalDataset(
                 [os.path.join(self.data_path, "validate.json")],
                 # self.uses_lean4,
@@ -399,11 +399,11 @@ class RetrievalDataModule(pl.LightningDataModule):
             )
             self.all_premises.update(self.ds_val.all_premises)
 
-        if stage in (None, "fit", "predict"):
+        if stage in (None, "fit", "test"):
             # TODO: not sure this is right. Actually only take whatever the user asks us to take?
             # Actually, we should probably only take 'test', as `validate` is called per epoch to
             # decide on the best model.
-            self.ds_pred = RetrievalDataset(
+            self.ds_test = RetrievalDataset(
                 [os.path.join(self.data_path, "test.json")],
                 # [
                 #     os.path.join(self.data_path, f"{split}.jsonl")
@@ -416,7 +416,7 @@ class RetrievalDataModule(pl.LightningDataModule):
                 self.tokenizer,
                 is_train=False,
             )
-            self.all_premises.update(self.ds_pred.all_premises)
+            self.all_premises.update(self.ds_test.all_premises)
         self.all_premises = list(self.all_premises)
         print(f"all premises length: {len(self.all_premises)}")
 
@@ -442,13 +442,16 @@ class RetrievalDataModule(pl.LightningDataModule):
             drop_last=False,
         )
 
-    def predict_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.ds_pred,
-            batch_size=self.eval_batch_size,
-            num_workers=self.num_workers,
-            collate_fn=self.ds_pred.collate,
-            shuffle=False,
-            pin_memory=True,
-            drop_last=False,
-        )
+    def test_dataloader(self) -> List[DataLoader]:
+        out_dses = []
+        for ds in [self.ds_train, self.ds_val, self.ds_test]:
+            out_dses.append(DataLoader(
+                ds,
+                batch_size=self.eval_batch_size,
+                num_workers=self.num_workers,
+                collate_fn=ds.collate,
+                shuffle=False,
+                pin_memory=True,
+                drop_last=False,
+                ))
+        return out_dses

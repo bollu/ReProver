@@ -42,7 +42,7 @@ model:
 
 data:
   # data_path: ../fstarscraper/fstar_insights/lemmas_with_premises/dataset_random # why do I need this?
-  data_path: ../fstarscraper/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data  # why do I need this?
+  data_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data  # why do I need this?
   # corpus_path: ../fstarscraper/fstar_insights/lemmas_with_premises/corpus.jsonl # why do I need this?
   num_negatives: 3
   num_in_file_negatives: 0
