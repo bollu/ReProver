@@ -1,0 +1,4 @@
+data:
+  data_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data/
+  batch_size: 32
+  eval_batch_size: 128
