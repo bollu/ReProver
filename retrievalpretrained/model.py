@@ -31,7 +31,7 @@ logger.debug("openAI models:")
 openai.Model.list()
 logger.debug("-----")
 
-def openai_batch(strings :  List[str], max_tokens : int = 5000, batch_size : int = 16):
+def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int = 16):
     """
     batch the list of strings according to openAI batching rules,
     which is that each batch can have at most 5000 tokens,
@@ -83,9 +83,10 @@ class Range:
         return Range(start_loc=Loc.unknown(),
                      end_loc=Loc.unknown())
 
+UNKNOWN_FILE_PATH="<UNK>"
 @dataclass
 class Located:
-    file_path : str 
+    file_path : str
     file_range: Range
     name : str # the name of the object that is located.
 
@@ -109,12 +110,13 @@ class Corpus:
         self.definitions = []
         self.name2def = dict()
 
-    def add_definition(self, d : Located): 
+    def add_definition(self, d : Located) -> LocatedIx: 
         if d.name in self.name2def: 
-            raise AssertionError("double definition of definition '{d.name}'")
+            raise AssertionError(f"double definition of definition '{d.name}'")
         ix = len(self.definitions)
         self.definitions.append(d)
         self.name2def[d.name] = ix
+        return ix
 
 
     def try_def2ix (self, name : str) -> Optional[int]:
@@ -140,6 +142,7 @@ class Record:
 class DataLoader:
     corpus : Corpus
     records : List[Record]
+    all_premise_ixs : List[LocatedIx] # all premises ever
 
     def __init__(self):
         self.corpus = Corpus()
@@ -162,6 +165,11 @@ class DataLoader:
             if i == 0:
                 logger.debug(f"loading datum with keys '{datum.keys()}'")
                 logger.debug(f"loading '{i}'th data from '{data_path}'. keys: '{datum.keys()}'")
+
+            if datum["name"] in self.corpus.name2def:
+                logger.warning(f'already have definition {datum["name"]}. skipping.')
+                continue
+
             d = Definition(
                 file_path = datum["file_name"],
                 file_range = Range(
@@ -179,25 +187,32 @@ class DataLoader:
 
         # Second pass: generate training records.
         ntotal = 0
-        nadded = 0
+        nfaked = 0
         for (i, datum) in tqdm(enumerate(in_data), desc="building training records"):
             skip = False
             ntotal += 1
             context_ix = self.corpus.try_def2ix(datum["name"])
             if context_ix is None:
-                skip = True
-                logger.warning(f'skipping datum {datum["name"]}, unable to find datum')
+                logger.error(f'expected to find definition {datum["name"]}, unable to find datum')
+                raise AssertionError('unable to find definition {datum["name"]}')
 
             all_pos_premise_ixs = []
             for p in datum["premises"]:
                 ix = self.corpus.try_def2ix(p)
                 if ix is None:
-                    logger.warning(f'skipping datum {datum["name"]}, unable to find premise {p}')
-                    skip = True
+                    logger.warning(f'in datum {datum["name"]}, unable to find premise {p}. Creating fake definition')
+                    ix = self.corpus.add_definition(
+                        Definition(file_path=UNKNOWN_FILE_PATH,
+                                  file_range=Range.unknown(),
+                                  name=p,
+                                  type_="",
+                                  definition=""))
+                    nfaked += 1
+                assert ix is not None
                 all_pos_premise_ixs.append(ix)
+                self.all_premise_ixs.append(ix)
 
             if skip: continue
-            nadded += 1
             for pos_premise_ix in all_pos_premise_ixs:
                 self.records.append(Record(
                     context_ix=context_ix,
@@ -205,7 +220,7 @@ class DataLoader:
                     all_pos_premise_ixs=all_pos_premise_ixs
                 ))       
         # end of loop over data
-        logger.debug(f"added {nadded}/{ntotal} = {nadded/ntotal*100:4.2f} %")
+        logger.debug(f"faked {nfaked}/{ntotal} = {nfaked/ntotal*100:4.2f} %")
 
     def load_data_from_files(self, data_paths: List[str]):
         for path in data_paths:
@@ -250,50 +265,165 @@ class OutputDirectory:
         with open(self.curdir / filepath.name, "w") as fout:
             fout.write(open(filepath).read())
 
-def fit(output_dir : OutputDirectory, data_path : str, batch_size : int, eval_batch_size : int):
+def download(output_dir : OutputDirectory, data_path : str, batch_size : int, eval_batch_size : int):
     dl = DataLoader()
     dl.load_data_from_files([pathlib.Path(data_path) / "train.json",
                              pathlib.Path(data_path) / "test.json",
                              pathlib.Path(data_path) / "validate.json"])
     model = Model()
-    strings = set()
+    strings = set() # is this deterministic when converting to list?
 
     for record in tqdm(dl.records, desc="querying openAI"):
         ctx = dl.corpus.ix2def(record.context_ix)
         premise = dl.corpus.ix2def(record.pos_premise_ix)
-        strings.add(ctx.definition)
+        # can have empty definition from premises whose definitions we don't know.
+        if ctx.definition:
+            strings.add(ctx.definition)
         strings.add(premise.name)
 
     logger.debug("done querying. Now building gzip record")
-    strings = list(strings)
+    strings = list(strings) # is this deterministic? probably not.
     for strings_batch in tqdm(list(openai_batch(strings)), desc="building openAI embeddings"):
+        assert len(strings_batch)
+        logger.debug(f"vvbatch size: {len(strings_batch)}vv")
+        logger.debug(f"\n".join([f"  - '{s}'" for s in strings_batch]))
+        logger.debug(f"--")
         vecs = get_embeddings(strings_batch, engine=embedding_model)
         model.add_words(strings_batch, vecs)
 
 
     logger.debug("dumping model.")
     with gzip.open(output_dir.get_curdir_path() / "embeddings.pickle.gz", "wb") as f:
-        pickle.dump(model, f)
+        # TODO: consider also dumping the dataloader since it contains the ordering of the data?
+        pickle.dump({"model": model, "dl" : dl}, f)
     logger.debug("dumped!")
 
 
-def test(data):
-    pass
+
+@dataclass
+class TestStatisticsCollator:
+    R1s : List[int] = field(default_factory=list)
+    test_step_outputs : List[Dict[str, Any]] = field(default_factory=list)
+    Ks_at_full_recall : List[int] = field(default_factory=list)
+    Ks_percent_at_full_recall : List[int] = field(default_factory=list)
+    R10s : List[int] = field(default_factory=list)
+    RRs : List[int]= field(default_factory=list)
+    APs : List[int] = field(default_factory=list)
+    NDCGs : List[int] = field(default_factory=list)
+def test(output_dir : OutputDirectory, ckpt_path : str, data_path : str, batch_size : int, eval_batch_size : int):
+    ckpt_path = pathlib.Path(ckpt_path)
+    logger.debug("loading pickle...")
+    with gzip.open(ckpt_path, "rb") as f:
+        loaded = pickle.load(f)
+        model = loaded["model"]
+        all_dl = loaded["dl"]
+    assert model is not None
+    assert all_dl is not None
+    assert isinstance(model, Model)
+    assert isinstance(all_dl, DataLoader)
+    print(f"loaded pickle! model #strings: '{len(model.strings)}'")
+
+    data_paths = [pathlib.Path(data_path) / "train.json",
+             pathlib.Path(data_path) / "test.json",
+             pathlib.Path(data_path) / "validate.json"])
+
+    all_dl = DataLoader()
+    all_dl.load_data_from_files(data_paths) # load all data for all premises.
+    all_premises_embeds = torch.tensor.cat([model.embeddings[pix] for pix in all_dl.all_premise_ixs])
+    for data_path in data_paths:
+        dl = DataLoader()
+        dl.load_data_from_file(path)
+
+        logger.info(f"running evaluation on {path}")
+        R1 = []
+        R10 []
+        MAP = []
+        NDCG = []
+        IDCG = []
+        collator = TestStatisticsCollator()
+
+        for record in tqdm(dl.records, desc=f"evaluation on {path}"):
+            similarities = model.embeddings[record.context_i] @ all_premises_embeds
+            idxs = similarities.argsort(dim=1, descending=True).tolist()
+
+            TP1 = retrieved_premises[0] in all_pos_premises
+            R1 = float(TP1) / len(all_pos_premises)
+            collator.R1s.append(R1)
+            TP10 = len(all_pos_premises_set.intersection(retrieved_premises[:10]))
+            R10 = float(TP10) / len(all_pos_premises)
+            collator.R10s.append(R10)
+
+            RR = 0
+            for j, p in enumerate(retrieved_premises):
+                if p in all_pos_premises:
+                    RR = (1.0 / (j + 1))
+                    break
+            collator.RRs.append(RR)
+
+            # AP = integral_0^1 P(r) dr
+            # change of variables into k 
+            # let rel(k) = 1 if retrieved_premises[k] in all_pos_premises else 0
+            # let s(k) = sum_{j=0}^k rel(j)
+            # p(k) = s(k) / k
+            # r = s(k) / |all_pos_premises|
+            # dk = 1
+            # dr = (r(k + dk) -  r(k)) / dk 
+            #    = (r(k + 1) - r(k)) / 1
+            #    = rel(k+1) / |all_pos_premises|
+            # AP = integral_0^1 P(r) dr
+            #    = sum_0^N P(r(k)) dr(k)
+            #    = sum_0^N p(k) rel(k) / |all_pos_premises|
+            AP = 0
+            DCG = 0
+            IDCG = 0
+            
+            K_at_full_recall = np.nan # How to correctly initialize?
+            K_percent_at_full_recall = np.nan
+            ncorrect_at_j = 0
+
+            for j, p in enumerate(retrieved_premises):
+                discount = np.log2(j + 1) if j > 0 else 1
+                if j < len(all_pos_premises):
+                    IDCG += 1.0 / discount          
+
+                rel_at_j = int(p in all_pos_premises)
+                ncorrect_at_j += rel_at_j
+
+                if ncorrect_at_j == len(all_pos_premises):
+                    K_at_full_recall = j + 1
+                    K_percent_at_full_recall = K_at_full_recall / len(retrieved_premises)
+                DCG += rel_at_j / discount
+                p_at_j = ncorrect_at_j / (j + 1)
+                AP += p_at_j * rel_at_j
+            AP /= len(all_pos_premises)
+            collator.APs.append(AP)
+            NDCG = DCG / IDCG
+            collator.NDCGs.append(NDCG)
+            collator.Ks_at_full_recall.append(K_at_full_recall)
+            collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
+
+        # finish processing all records.
+        # average NDCG
+        R1 = np.mean(collator.R1)
+        R10 = np.mean(collator.R10)
+        MAP = np.mean(collator.MAP)
+        NDCG = np.mean(collator.NDCG)
+        logger.info(f"** Eval on {path} | R1: {R1} % , R10: {R10} %, MAP: {MAP} %, NDCG: {NDCG} % **")
 
 def toplevel(args: argparse.Namespace):
     output_dir = OutputDirectory()
     output_dir.copy_file(os.path.realpath(args.config.name))
 
     opts = yaml.safe_load(args.config)["data"]
-    if args.command == "fit":
-        fit(output_dir=output_dir, **opts)
+    if args.command == "download":
+        download(output_dir=output_dir, **opts)
         return
-
+    
     if args.command =="test":
-        test(output_dir=output_dir, **opts)
+        test(output_dir=output_dir, ckpt_path=args.ckpt_path, **opts)
         return
 
-    print(f"ERROR: expected one of 'fit' or 'test' commands, found: '{args.command}'")
+    print(f"ERROR: expected one of 'download' or 'test' commands, found: '{args.command}'")
     sys.exit(1)
 
 def main():
@@ -302,11 +432,18 @@ def main():
     parser.add_argument('--config', type=argparse.FileType('r'), required=True)
     parser.set_defaults(command=None)
 
+    # download vectors from openAI embeddings.
     subparsers = parser.add_subparsers()
+    download = subparsers.add_parser('download')
+    download.set_defaults(command="download")
+
+    # run training loop of linear layer.
     fit = subparsers.add_parser('fit')
     fit.set_defaults(command="fit")
 
+    # run cosine similarity.
     test = subparsers.add_parser('test')
+    test.add_argument("--ckpt_path", required=True, type=str)
     test.set_defaults(command="test")
 
     args = parser.parse_args()
