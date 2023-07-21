@@ -118,6 +118,11 @@ class Corpus:
         self.name2def[d.name] = ix
         return ix
 
+    def get_in_file_negative_sample(self, d : LocatedIx) -> LocatedIx:
+        return random.randint(0, len(self.definitions))
+
+    def get_out_of_file_negative_sample(self, d : LocatedIx) -> LocatedIx:
+        return random.randint(0, len(self.definitions))
 
     def try_def2ix (self, name : str) -> Optional[int]:
         if name in self.name2def:
@@ -229,18 +234,82 @@ class DataLoader:
                     
 @dataclass
 class Model:
-    embeddings : List[torch.Tensor] = field(default_factory=list)
-    strings : List[str] = field(default_factory=list)
+    # indexed by string index.
+    embeddings : torch.tensor = None
+    minibatch_size : int
+    dl : DataLoader
+    num_out_of_file_neg_samples : int
+    num_in_file_neg_samples : int
+
+    def initialize_embeddings(self, num_embeddings: int, embedding_dim: int):
+        self.embeddings = torch.Tensor([num_embeddings, embedding_dim])
+
+    def add_word(self, ix: LocatedIx, embedding : torch.Tensor, dl : DataLoader):
+        self.embeddings[ix] = embedding
+
+    def add_words(self, ixs : List[LocatedIx], embeddings : List[torch.Tensor]):
+        for (ix, embed) in zip(ixs, embeddings):
+            self.embeddings[ix] = embed
+
+    def train_microbatch(self, data: Dict[str, Any]) -> torch.Tensor:
+        loss = 0
+        for record in records:
+            pass
+        return loss
+
+    def make_microbatch(self, records: List[Record]) -> Dict[str, Any]:
+        out = dict()
+        out["context"] = []
+        out["premise"] = []
+        out["similarity"] = []
+        # TODO: create negative samples.
+        for r in records:
+            for p in r.pos_premise_ix:
+                out["context"].append(self.embeddings[r.context_ix])
+                out["premise"].append(self.embeddings[p])
+                out["similarity"].append(1.0)
+
+            nsamples = 0
+            while nsamples < self.num_in_file_neg_samples:
+                out["context"].append(self.embeddings[r.context_ix])
+                p = self.dl.corpus.get_in_file_negative_sample(r.corpus_ix)
+                if p in r.all_pos_premise_ixs: continue
+                nsamples += 1
+                out["premise"].append(self.embeddings[p])
+                out["similarity"].append(0.0)
 
 
-    def add_word(self, s : str, embedding : torch.Tensor):
-        self.strings.append(s)
-        self.embedding.append(embedding)
+            nsamples = 0
+            while nsamples < self.num_out_of_file_neg_samples:
+                out["context"].append(self.embeddings[r.context_ix])
+                p = self.dl.corpus.get_out_of_file_negative_sample(r.corpus_ix)
+                if p in r.all_pos_premise_ixs: continue
+                nsamples += 1
+                out["premise"].append(self.embeddings[p])
+                out["similarity"].append(0.0)
+        out["context"] = torch.cat(out["context"])
+        out["premise"] = torch.cat(out["premise"])
 
-    def add_words(self, ss : List[str], embeddings : List[torch.Tensor]):
-        self.strings.extend(ss)
-        self.embeddings.extend(embeddings)
 
+
+    def train_minibatch(self, records: List[Record]) -> float:
+        loss = 0
+        for i in range(len(records), self.microbatch_size):
+            loss += self.train_microbatch(records[i:i+self.microbatch_size]))
+        loss.backward()
+        logger.debug(f"batch loss: {loss.item()}")
+        return loss.item()
+
+    def train_epoch_ (self, records: List[Record]) -> float
+        epoch_loss = 0
+        for i in range(len(records), self.minibatch_size):
+            epoch_loss += self.train_minibatch(records[i:i+self.minibatch_size])
+        logger.debug(f"epoch loss: {loss.item()}")
+        return epoch_loss
+
+    def train(self):
+        for e in range(nepochs):
+            epoch_loss = self.train_epoch_(self.dl.records)
 
 class OutputDirectory:
     basedir_path : pathlib.Path = pathlib.Path("pretrained_logs")
@@ -325,7 +394,7 @@ def test(output_dir : OutputDirectory, ckpt_path : str, data_path : str, batch_s
 
     data_paths = [pathlib.Path(data_path) / "train.json",
              pathlib.Path(data_path) / "test.json",
-             pathlib.Path(data_path) / "validate.json"])
+             pathlib.Path(data_path) / "validate.json"]
 
     all_dl = DataLoader()
     all_dl.load_data_from_files(data_paths) # load all data for all premises.
@@ -336,7 +405,7 @@ def test(output_dir : OutputDirectory, ckpt_path : str, data_path : str, batch_s
 
         logger.info(f"running evaluation on {path}")
         R1 = []
-        R10 []
+        R10 = []
         MAP = []
         NDCG = []
         IDCG = []

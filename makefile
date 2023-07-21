@@ -28,3 +28,9 @@ evaluate_reprover:
 		  --data-path data/leandojo_benchmark/random \
 		  --preds-file PATH_TO_PREDICTIONS_PICKLE
 
+
+fit_pretrained:
+	python3 -m retrievalpretrained.model --config retrievalpretrained/confs/cli_saikat_dataset.yaml  fit
+
+evaluate_pretrained:
+	python3 -m retrievalpretrained.model --config retrievalpretrained/confs/cli_saikat_dataset.yaml  test --ckpt_path $LATEST_PATH
