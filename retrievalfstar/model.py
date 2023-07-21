@@ -9,6 +9,7 @@ from tqdm import tqdm
 from commonfstar import Pos
 from loguru import logger
 import pytorch_lightning as pl
+import torch
 import torch.nn.functional as F
 from typing import List, Dict, Any, Tuple, Union
 from transformers import T5EncoderModel, AutoTokenizer
@@ -56,6 +57,7 @@ class PremiseRetriever(pl.LightningModule):
         warmup_steps: int,
         num_retrieved: int,
         max_seq_len: int,
+        d_embed: int,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -65,6 +67,8 @@ class PremiseRetriever(pl.LightningModule):
         self.max_seq_len = max_seq_len
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.encoder = T5EncoderModel.from_pretrained(model_name)
+        self.linear_context = torch.nn.Linear(self.encoder.config.d_model, d_embed)
+        self.linear_premise = torch.nn.Linear(self.encoder.config.d_model, d_embed)
         self.embeddings_staled = True
 
     @classmethod
@@ -117,6 +121,7 @@ class PremiseRetriever(pl.LightningModule):
         ) / lens.unsqueeze(1)
 
         # Normalize the feature vector to have unit norm.
+        # TODO: consider adding linear layer here?
         return F.normalize(features, dim=1)
 
     def forward(
@@ -131,10 +136,10 @@ class PremiseRetriever(pl.LightningModule):
     ) -> torch.FloatTensor:
         """Compute the contrastive loss for premise retrieval."""
         # Encode the query and positive/negative documents.
-        context_emb = self._encode(context_ids, context_mask)
-        pos_premise_emb = self._encode(pos_premise_ids, pos_premise_mask)
+        context_emb =   self.linear_context(self._encode(context_ids, context_mask))
+        pos_premise_emb = self.linear_premise(self._encode(pos_premise_ids, pos_premise_mask))
         neg_premise_embs = [
-            self._encode(ids, mask)
+            self.linear_premise(self._encode(ids, mask))
             for ids, mask in zip_strict(neg_premises_ids, neg_premises_mask)
         ]
         all_premise_embs = torch.cat([pos_premise_emb, *neg_premise_embs], dim=0)
@@ -223,8 +228,7 @@ class PremiseRetriever(pl.LightningModule):
     def on_validation_start(self) -> None:
         self.reindex_corpus(self.trainer.datamodule.eval_batch_size)
 
-    @staticmethod
-    def get_nearest_premises(
+    def get_nearest_premises(self,
         datamodule : RetrievalDataModule,
         premise_embeddings: torch.FloatTensor,
         batch_context: List[Context],
@@ -232,7 +236,7 @@ class PremiseRetriever(pl.LightningModule):
         k: int,
     ) -> Tuple[List[List[Premise]], List[List[float]]]:
         """Perform a batch of nearest neighbour search."""
-        similarities = batch_context_emb @ premise_embeddings.t()
+        similarities = self.linear_context(batch_context_emb) @ self.linear_premise(premise_embeddings).t()
         idxs_batch = similarities.argsort(dim=1, descending=True).tolist()
         results = [[] for _ in batch_context]
         scores = [[] for _ in batch_context]
@@ -268,7 +272,7 @@ class PremiseRetriever(pl.LightningModule):
         #     self.num_retrieved,
         # )
 
-        retrieved_premises, _ = PremiseRetriever.get_nearest_premises(
+        retrieved_premises, _ = self.get_nearest_premises(
             self.trainer.datamodule,
             self.corpus_embeddings,
             batch["context"],
@@ -364,7 +368,7 @@ class PremiseRetriever(pl.LightningModule):
         # ALL_POS_PREMISES: BATCHSIZE x <ragged>
         all_pos_premises_batched = batch["all_pos_premises"]
         # RETRIEVED_PREMISES: BATCHSIZE x NUM_RETRIEVED
-        retrieved_premises_batched, scores_batched = PremiseRetriever.get_nearest_premises(
+        retrieved_premises_batched, scores_batched = self.get_nearest_premises(
             self.trainer.datamodule,
             self.corpus_embeddings,
             batch["context"],
@@ -378,10 +382,10 @@ class PremiseRetriever(pl.LightningModule):
             retrieved_premises = retrieved_premises_batched[bix]
 
             TP1 = retrieved_premises[0] in all_pos_premises
-            R1 = float(TP1) / len(all_pos_premises)
+            R1 = float(TP1) / len(all_pos_premises) * 100.0
             collator.R1s.append(R1)
             TP10 = len(all_pos_premises_set.intersection(retrieved_premises[:10]))
-            R10 = float(TP10) / len(all_pos_premises)
+            R10 = float(TP10) / len(all_pos_premises) * 100.0
             collator.R10s.append(R10)
 
             RR = 0
@@ -426,7 +430,6 @@ class PremiseRetriever(pl.LightningModule):
                 DCG += rel_at_j / discount
                 p_at_j = ncorrect_at_j / (j + 1)
                 AP += p_at_j * rel_at_j
- 
             AP /= len(all_pos_premises)
             collator.APs.append(AP)
             NDCG = DCG / IDCG
@@ -560,7 +563,7 @@ class PremiseRetriever(pl.LightningModule):
         #     k,
         # )
 
-        retrieved_premises, scores = PremiseRetriever.get_nearest_premises(
+        retrieved_premises, scores = self.get_nearest_premises(
             self.trainer.datamodule,
             self.corpus_embeddings,
             ctx,

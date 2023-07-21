@@ -1,4 +1,4 @@
-"""Datamodule for the premise retrieval."""
+# """Datamodule for the premise retrieval."""
 import os
 import json
 import torch
@@ -17,10 +17,12 @@ from lean_dojo.constants import LEAN3_DEPS_DIR, LEAN4_DEPS_DIR
 from typing import *
 import pathlib
 import pprint
+import networkx as nx
+from dataclasses import dataclass
 
 pp = pprint.PrettyPrinter(indent=2)
 
-from commonfstar import Context, Corpus, Batch, Example, format_state, get_all_pos_premises
+from commonfstar import Context, Batch, Example, format_state, get_all_pos_premises
 
 # {
 #   "file_name": "Pulse.Checker.Pure.fst",
@@ -104,10 +106,100 @@ from commonfstar import Context, Corpus, Batch, Example, format_state, get_all_p
 #   "is_lemma": false
 # }
 
+
+@dataclass 
+class Location:
+    start_line : int 
+    start_col  : int 
+    file_name  : str
+    
+class Corpus:
+    data_path : str
+    corpus_path : str
+    import_graph_path : str
+    all_premises: List[str]
+
+    corpus : List[Dict[str, Any]] # TODO: parse
+    name2corpusix : Dict[str, int]
+    file_graph: nx.Digraph
+    transitive_file_graph : nx.DiGraph
+
+
+
+    def __init__(self):
+        self.corpus = self.load_corpus(corpus_path)
+        self.name2corpusix = self.build_corpus_index(self.corpus)
+        self.file_graph = self.load_file_dag(import_graph_path)
+        self.transitive_file_graph = nx.transitive_closure(self.file_graph)
+
+    def load_corpus(self, corpus_path: str) -> List[Dict[str, Any]]:
+        return json.load(open(corpus_path))
+
+
+    def build_corpus_index(self, corpus: List[Dict[str, Any]]) -> Dict[str, int]:
+        name2ix = dict()
+        for (ix, record) in enumerate(corpus):
+            name = record["name"]
+            assert name not in name2ix 
+            name2ix[name] = ix 
+        return name2ix
+
+    def load_file_dag(self, import_graph_path: str) -> nx.DiGraph:
+        g = nx.DiGraph()
+        for record in json.load(open(import_graph_path)):
+            g.add_node(record["name"])
+            for imp in record["imports"]:
+                g.add_node(imp)
+                g.add_edge(record["name"], imp)
+        return g
+
+    def names(self) -> Iterable[str]:
+        return self.name2corpusix.keys()
+
+    def get_loc_from_defn(self, defn: Dict[str, Any]):
+        return Location(start_line=defn["start_line"],
+                            start_col=defn["start_col"],
+                            file_name=defn["file_name"])
+
+        
+    def get_loc_for_name(self, name: str) -> Location:
+        assert name in self.name2corpusix
+        return self.get_loc_from_defn(self.corpus[self.name2corpusix[name]])
+
+    def occurs_before_loc(self, later : Location, earlier : Location) -> bool:
+        # if later imports earlier, then there is an edge f2 -> f1.
+        # if there is no edge, the later does not import earlier,
+        # and thus later does not occur before.
+        if not self.transitive_file_graph.has_edge(later, earlier):
+            return False 
+        if later.file_name != earlier.file_name:
+            # later imports earlier, and thus it does occur before.
+            return True
+        else:
+            # both in same file, must check position
+            return (later.start_line > earlier.start_line) or \
+                    (later.start_line == earlier.start_line and later.start_col > earlier.start_col)
+
+	
+    def get_premise_embed_str_for_name(self, name: str) -> Dict[str, Any]:
+        assert name in self.name2corpusix
+        record = self.corpus[self.name2corpusix[name]]
+        return name + ":" + record["type"] + " := " + record["definition"]
+
+    def get_ctx_embed_str_for_name(self, name: str) -> Dict[str, Any]: 
+        assert name in self.name2corpusix
+        record = self.corpus[self.name2corpusix[name]]
+        return name + ":" + record["type"]
+
+    def has_definition_for_name(self, name: str) -> bool:
+        return name in self.name2corpusix
+
+
 class RetrievalDataset(Dataset):
     def __init__(
         self,
         data_paths: List[str],
+        corpus : Corpus,
         num_negatives: int,
         num_in_file_negatives: int,
         max_seq_len: int,
@@ -115,6 +207,7 @@ class RetrievalDataset(Dataset):
         is_train: bool,
     ) -> None:
         super().__init__()
+        self.corpus = corpus
         self.num_negatives = num_negatives
         self.num_in_file_negatives = num_in_file_negatives
         self.max_seq_len = max_seq_len
@@ -153,12 +246,17 @@ class RetrievalDataset(Dataset):
                 type_=datum["type"],
                 definition=datum["definition"])
             # all premises that are *used* in the tactic.
-            # all_pos_premises = datum["premises"]
-            all_pos_premises = datum["only_def_premises"]
-            for pos_premise in all_pos_premises:
+            all_pos_premise_names = datum["premises"]
+            know_all_premise_defs = all([self.corpus.has_definition_for_name(p) for p in all_pos_premise_names])
+            if not know_all_premise_defs:
+                continue # skip this def cause its premise does not occur
+            all_pos_premises = [self.corpus.get_premise_embed_str_for_name(p) for p in all_pos_premises]
+            for pos_premise_name, pos_premise in zip(all_pos_premise_names, all_pos_premises):
                 out_data.append({
                     "context": context,
-                    "pos_premise": pos_premise, # TODO: create an actual Premise object? smh.
+                    "pos_premise_name": pos_premise_name,
+                    "pos_premise": pos_premise,  # TODO: create an actual Premise object? smh.
+                    "all_pos_premise_names": all_pos_premise_names,
                     "all_pos_premises": all_pos_premises, # all of the premises that this premise co-occurs with in this context.
                 })       
                     
@@ -229,6 +327,17 @@ class RetrievalDataset(Dataset):
         premises_in_file = []
         premises_outside_file = []
 
+        for p in self.corpus.names():
+            if p == ex["pos_premise_name"]: continue
+            # TODO: randomize this?
+            p_loc = self.corpus.get_loc_for_name(p)
+            pos_loc = self.corpus.get_loc_for_name(ex["pos_premise_name"])
+            if self.corpus.occurs_before_loc(p_loc, pos_loc):
+                if p_loc.file_name == pos_loc.file_name:
+                    premises_in_file.append(p)
+                else:
+                    premises_outside_file.append(p)
+
 
         # TODO: implement negative sampling from the context.
         # for p in self.corpus.get_premises(ex["context"].path):
@@ -249,20 +358,22 @@ class RetrievalDataset(Dataset):
         #         premises_outside_file += self.corpus.get_premises(p)
         # num_in_file_negatives = min(len(premises_in_file), self.num_in_file_negatives)
 
-        premises_in_file = [] # TODO: correctly instantiate!
-        premises_outside_file = self.all_premises
+        # premises_in_file = [] # TODO: correctly instantiate!
+        # premises_outside_file = self.all_premises
 
         num_in_file_negatives = min(len(premises_in_file), self.num_in_file_negatives)
 
-        ex["neg_premises"] = random.sample(
+        ex["neg_premises_names"] = random.sample(
             premises_in_file, num_in_file_negatives
         ) + random.sample(
             premises_outside_file, self.num_negatives - num_in_file_negatives
         )
+
+        ex["neg_premises"] = [self.corpus.get_premise_embed_str_for_name(n) for n in ex["neg_premises_names"]]
         return ex
 
-    def collate(self, examples: List[Example]) -> Batch:
-        batch = {}
+    def collate(self, examples: List[Example]) -> Dict[str, Any]:
+        batch = dict()
 
         # Tokenize the context.
         context = [ex["context"] for ex in examples]
@@ -337,12 +448,16 @@ class RetrievalDataset(Dataset):
 
 class RetrievalDataModule(pl.LightningDataModule):
     data_path : str
-    all_premises: List[str]
-
+    corpus_path : str
+    import_graph_path : str
+    all_premises: Set[str]
+    corpus : Corpus
+    
     def __init__(
         self,
         data_path: str,
-        # corpus_path: str,
+        corpus_path: str,
+        import_graph_path : str,
         num_negatives: int,
         num_in_file_negatives: int,
         model_name: str,
@@ -353,6 +468,8 @@ class RetrievalDataModule(pl.LightningDataModule):
     ) -> None:
         super().__init__()
         self.data_path = data_path
+        self.corpus_path = corpus_path
+        self.import_graph_path = import_graph_path
         self.num_negatives = num_negatives
         assert 0 <= num_in_file_negatives <= num_negatives
         self.num_in_file_negatives = num_in_file_negatives
@@ -362,11 +479,6 @@ class RetrievalDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # self.corpus = Corpus(corpus_path)
-        # self.corpus = Corpus(data_path)
-        # metadata = json.load(open(os.path.join(data_path, "../metadata.json")))
-        # repo = LeanGitRepo(**metadata["from_repo"])
-        # self.uses_lean4 = repo.uses_lean4
 
     def prepare_data(self) -> None:
         pass
@@ -375,9 +487,9 @@ class RetrievalDataModule(pl.LightningDataModule):
         self.all_premises = set()
         if stage in (None, "fit", "test"):
             self.ds_train = RetrievalDataset(
-                [os.path.join(self.data_path, "train.json")],
+                [os.path.join(self.data_path, "train.jsonl")],
                 # self.uses_lean4,
-                # self.corpus,
+                self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,
                 self.max_seq_len,
@@ -388,9 +500,9 @@ class RetrievalDataModule(pl.LightningDataModule):
 
         if stage in (None, "fit", "validate", "test"):
             self.ds_val = RetrievalDataset(
-                [os.path.join(self.data_path, "validate.json")],
+                [os.path.join(self.data_path, "validate.jsonl")],
                 # self.uses_lean4,
-                # self.corpus,
+                self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,
                 self.max_seq_len,
@@ -404,12 +516,12 @@ class RetrievalDataModule(pl.LightningDataModule):
             # Actually, we should probably only take 'test', as `validate` is called per epoch to
             # decide on the best model.
             self.ds_test = RetrievalDataset(
-                [os.path.join(self.data_path, "test.json")],
+                [os.path.join(self.data_path, "test.jsonl")],
                 # [
                 #     os.path.join(self.data_path, f"{split}.jsonl")
                 #     for split in ("train", "validate", "test")
                 # ],
-                # self.corpus,
+                self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,
                 self.max_seq_len,
@@ -417,7 +529,6 @@ class RetrievalDataModule(pl.LightningDataModule):
                 is_train=False,
             )
             self.all_premises.update(self.ds_test.all_premises)
-        self.all_premises = list(self.all_premises)
         print(f"all premises length: {len(self.all_premises)}")
 
     def train_dataloader(self) -> DataLoader:
@@ -455,3 +566,4 @@ class RetrievalDataModule(pl.LightningDataModule):
                 drop_last=False,
                 ))
         return out_dses
+
