@@ -170,16 +170,16 @@ class PremiseRetriever(pl.LightningModule):
         if not self.embeddings_staled:
             return
         logger.info("Re-indexing the retrieval corpus")
-
+        all_premise_names = self.corpus.get_all_premise_names()
         self.corpus_embeddings = torch.zeros(
-            len(self.corpus.all_premises),
+            len(all_premise_names),
             self.embedding_size,
             dtype=self.encoder.dtype,
             device=self.device,
         )
 
         for i in tqdm(range(0, len(self.corpus), batch_size)):
-            batch_premises = self.corpus.all_premises[i : i + batch_size]
+            batch_premises = all_premise_names[i : i + batch_size]
             tokenized_premises = self.tokenizer(
                 [p.serialize() for p in batch_premises],
                 padding="longest",

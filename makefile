@@ -34,3 +34,11 @@ fit_pretrained:
 
 evaluate_pretrained:
 	python3 -m retrievalpretrained.model --config retrievalpretrained/confs/cli_saikat_dataset.yaml  test --ckpt_path $LATEST_PATH
+
+
+dockerls:
+	docker container ls
+dockerrestart:
+	docker restart empower.food.bargain 
+dockerssh:
+	docker attach empower.food.bargain

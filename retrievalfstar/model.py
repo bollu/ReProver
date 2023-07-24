@@ -6,7 +6,7 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 # from lean_dojo import Pos
-from commonfstar import Pos
+# from commonfstar import Pos
 from loguru import logger
 import pytorch_lightning as pl
 import torch
@@ -24,9 +24,6 @@ pp = pprint.PrettyPrinter(indent=2)
 
 
 from commonfstar import (
-    Premise,
-    Context,
-    Corpus,
     get_optimizers,
     load_checkpoint,
     zip_strict,
@@ -75,25 +72,6 @@ class PremiseRetriever(pl.LightningModule):
     def load(cls, ckpt_path: str, device, freeze: bool) -> "PremiseRetriever":
         return load_checkpoint(cls, ckpt_path, device, freeze)
 
-    def load_corpus(self, path_or_corpus: Union[str, Corpus]) -> None:
-        """Associate the retriever with a corpus."""
-        if isinstance(path_or_corpus, Corpus):
-            self.corpus = path_or_corpus
-            self.corpus_embeddings = None
-            self.embeddings_staled = True
-            return
-
-        path = path_or_corpus
-        if path.endswith(".jsonl"):  # A raw corpus without embeddings.
-            self.corpus = Corpus(path)
-            self.corpus_embeddings = None
-            self.embeddings_staled = True
-        else:  # A corpus with pre-computed embeddings.
-            indexed_corpus = pickle.load(open(path, "rb"))
-            self.corpus = indexed_corpus.corpus
-            self.corpus_embeddings = indexed_corpus.embeddings
-            self.embeddings_staled = False
-
     @property
     def embedding_size(self) -> int:
         """Return the size of the feature vector produced by ``encoder``."""
@@ -124,6 +102,7 @@ class PremiseRetriever(pl.LightningModule):
         # TODO: consider adding linear layer here?
         return F.normalize(features, dim=1)
 
+
     def forward(
         self,
         context_ids: torch.LongTensor,
@@ -134,7 +113,11 @@ class PremiseRetriever(pl.LightningModule):
         neg_premises_mask: torch.LongTensor,
         label: torch.LongTensor,
     ) -> torch.FloatTensor:
-        """Compute the contrastive loss for premise retrieval."""
+        """
+        Compute the contrastive loss for premise retrieval.
+        The DataLoder performs tokenization, and the model runs
+        the encoder decoder model onto the tokenized stream.
+        """
         # Encode the query and positive/negative documents.
         context_emb =   self.linear_context(self._encode(context_ids, context_mask))
         pos_premise_emb = self.linear_premise(self._encode(pos_premise_ids, pos_premise_mask))
@@ -198,21 +181,20 @@ class PremiseRetriever(pl.LightningModule):
         """Re-index the retrieval corpus using the up-to-date encoder."""
         if not self.embeddings_staled:
             return
+        all_premise_names = self.trainer.datamodule.corpus.premise_names
         logger.info("Re-indexing the retrieval corpus")
         logger.info(f"trainer: {pp.pformat(self.trainer)}")
         self.corpus_embeddings = torch.zeros(
-            len(self.trainer.datamodule.all_premises),
+            len(all_premise_names),
             self.embedding_size,
             dtype=self.encoder.dtype,
             device=self.device,
         )
 
-        print(f"all premises length: '{len(self.trainer.datamodule.all_premises)}'")
-        for i in tqdm(range(0, len(self.trainer.datamodule.all_premises), batch_size)):
-            batch_premises = self.trainer.datamodule.all_premises[i : i + batch_size]
-            # print(f"batch prmeises: {batch_premises}")
+        print(f"all premises length: '{len(all_premise_names)}'")
+        for i in tqdm(range(0, len(all_premise_names), batch_size)):
+            batch_premises = [self.trainer.datamodule.corpus.get_premise_embed_str_for_name(name) for name in all_premise_names[i : i + batch_size] ]
             tokenized_premises = self.tokenizer(
-                # [p.serialize() for p in batch_premises],
                 [p for p in batch_premises], # TODO: make this `Premise` object
                 padding="longest",
                 max_length=self.max_seq_len,
@@ -231,22 +213,22 @@ class PremiseRetriever(pl.LightningModule):
     def get_nearest_premises(self,
         datamodule : RetrievalDataModule,
         premise_embeddings: torch.FloatTensor,
-        batch_context: List[Context],
+        batch_context_names: List[str],
         batch_context_emb: torch.Tensor,
         k: int,
-    ) -> Tuple[List[List[Premise]], List[List[float]]]:
-        """Perform a batch of nearest neighbour search."""
+    ) -> Tuple[List[List[Dict[str, Any]]], List[List[float]]]:
+        """Perform a batch of nearest neighbour search. and returns the names of the closest premises"""
         similarities = self.linear_context(batch_context_emb) @ self.linear_premise(premise_embeddings).t()
         idxs_batch = similarities.argsort(dim=1, descending=True).tolist()
-        results = [[] for _ in batch_context]
-        scores = [[] for _ in batch_context]
+        results = [[] for _ in batch_context_names]
+        scores = [[] for _ in batch_context_names]
 
-        for j, (ctx, idxs) in enumerate(zip(batch_context, idxs_batch)):
+        for j, (ctx_name, idxs) in enumerate(zip(batch_context_names, idxs_batch)):
             for i in idxs:
-                p = datamodule.all_premises[i]
+                premise_name = datamodule.corpus.all_premise_names[i]
                 # if p in accessible_premises:
-                if True:
-                    results[j].append(p)
+                if datamodule.corpus.occurs_before_loc_by_name(premise_name, ctx_name):
+                    results[j].append(premise_name)
                     scores[j].append(similarities[j, i].item())
                     if len(results[j]) >= k:
                         break
@@ -275,7 +257,7 @@ class PremiseRetriever(pl.LightningModule):
         retrieved_premises, _ = self.get_nearest_premises(
             self.trainer.datamodule,
             self.corpus_embeddings,
-            batch["context"],
+            batch["context_name"],
             context_emb,
             self.num_retrieved
         )
@@ -286,13 +268,13 @@ class PremiseRetriever(pl.LightningModule):
         num_with_premises = 0
         tb = self.logger.experiment
         # pp.pprint(f"batch: {batch.keys()}")
-        for i, (all_pos_premises, premises) in enumerate(
-            zip_strict(batch["all_pos_premises"], retrieved_premises)
+        for i, (all_pos_premise_names, premises) in enumerate(
+            zip_strict(batch["pos_premise_name"], retrieved_premises)
         ):
             # Only log the first example in the batch.
             if i == 0:
-                # msg_gt = "\n\n".join([p.serialize() for p in all_pos_premises])
-                msg_gt = "\n\n".join([p for p in all_pos_premises])
+                # msg_gt = "\n\n".join([p.serialize() for p in all_pos_premise_names])
+                msg_gt = "\n\n".join([p for p in all_pos_premise_names])
                 # msg_retrieved = "\n\n".join(
                 #     [f"{j}. {p.serialize()}" for j, p in enumerate(premises)]
                 # )
@@ -300,25 +282,25 @@ class PremiseRetriever(pl.LightningModule):
                     [f"{j}. {p}" for j, p in enumerate(premises)]
                 )
 
-                TP = len(set(premises).intersection(all_pos_premises))
-                if len(all_pos_premises) == 0:
+                TP = len(set(premises).intersection(all_pos_premise_names))
+                if len(all_pos_premise_names) == 0:
                     r = math.nan
                 else:
-                    r = float(TP) / len(all_pos_premises)
+                    r = float(TP) / len(all_pos_premise_names)
                 msg = f"Recall@{self.num_retrieved}: {r}\n\nGround truth:\n\n```\n{msg_gt}\n```\n\nRetrieved:\n\n```\n{msg_retrieved}\n```"
                 tb.add_text(f"premises_val", msg, self.global_step)
 
-            all_pos_premises = set(all_pos_premises)
-            if len(all_pos_premises) == 0:
+            all_pos_premise_names = set(all_pos_premise_names)
+            if len(all_pos_premise_names) == 0:
                 continue
             else:
                 num_with_premises += 1
             first_match_found = False
 
             for j in range(self.num_retrieved):
-                TP = len(all_pos_premises.intersection(premises[: (j + 1)]))
-                recall[j].append(float(TP) / len(all_pos_premises))
-                if premises[j] in all_pos_premises and not first_match_found:
+                TP = len(all_pos_premise_names.intersection(premises[: (j + 1)]))
+                recall[j].append(float(TP) / len(all_pos_premise_names))
+                if premises[j] in all_pos_premise_names and not first_match_found:
                     MRR.append(1.0 / (j + 1))
                     first_match_found = True
             if not first_match_found:
@@ -524,50 +506,3 @@ class PremiseRetriever(pl.LightningModule):
                     }, of, indent=2)
                 logger.info(f"Retrieval predictions saved to {path}")
 
-    def retrieve(
-        self,
-        state: List[str],
-        file_name: List[str],
-        theorem_full_name: List[str],
-        theorem_pos: List[Pos],
-        k: int,
-    ) -> Tuple[List[Premise], List[float]]:
-        """Retrieve ``k`` premises from ``corpus`` using ``state`` and ``tactic_prefix`` as context."""
-        self.reindex_corpus(batch_size=32)
-
-        ctx = [
-            Context(*_)
-            for _ in zip_strict(file_name, theorem_full_name, theorem_pos, state)
-        ]
-        ctx_tokens = self.tokenizer(
-            [_.serialize() for _ in ctx],
-            padding="longest",
-            max_length=self.max_seq_len,
-            truncation=True,
-            return_tensors="pt",
-        )
-        context_emb = self._encode(
-            ctx_tokens.input_ids.to(self.device),
-            ctx_tokens.attention_mask.to(self.device),
-        )
-
-        if self.corpus_embeddings.device != context_emb.device:
-            self.corpus_embeddings = self.corpus_embeddings.to(context_emb.device)
-        if self.corpus_embeddings.dtype != context_emb.dtype:
-            self.corpus_embeddings = self.corpus_embeddings.to(context_emb.dtype)
-        
-        # retrieved_premises, scores = self.corpus.get_nearest_premises(
-        #     self.corpus_embeddings,
-        #     ctx,
-        #     context_emb,
-        #     k,
-        # )
-
-        retrieved_premises, scores = self.get_nearest_premises(
-            self.trainer.datamodule,
-            self.corpus_embeddings,
-            ctx,
-            context_emb,
-            k,
-        )
-        return retrieved_premises, scores
