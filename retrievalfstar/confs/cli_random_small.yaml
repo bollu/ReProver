@@ -42,7 +42,7 @@ model:
   d_embed: 512
 
 data:
-  data_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data/
+  data_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/dataset_random_small/
   corpus_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/corpus.json
   import_graph_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/file_import_graph.json
   num_negatives: 3
