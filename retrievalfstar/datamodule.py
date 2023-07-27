@@ -116,7 +116,6 @@ class Corpus:
     def load_file_dag(import_graph_path: str) -> nx.DiGraph:
         g = nx.DiGraph()
         for record in json.load(open(import_graph_path)):
-            logger.info(record)
             g.add_node(record["name"])
             for imp in record["imports"]:
                 g.add_node(imp)
@@ -354,7 +353,7 @@ class RetrievalDataset(Dataset):
                 for kneg in range (batch_size * self.num_negatives):
                     (bix, nix) = divmod(kneg, self.num_negatives) # kneg // self.num_negatives, kneg % self.num_negatives
                     # should use `modrem` ?
-                    neg_premise_name = examples[bix]["neg_premises_names"][nix]
+                    neg_premise_name = examples[bix]["neg_premise_names"][nix]
                     # it might accidentally be included, test for that hypothesis...
                     label[j, kneg] = float(neg_premise_name in examples[j]["all_pos_premise_names"])
             
@@ -362,7 +361,6 @@ class RetrievalDataset(Dataset):
             batch["neg_premises"] = []
             batch["neg_premises_ids"] = []
             batch["neg_premises_mask"] = []
-            logger.warning(examples)
             for i in range(self.num_negatives):
                 neg_premise = [self.corpus.get_premise_embed_str_for_name(ex["neg_premise_names"][i]) for ex in examples]
                 tokenized_neg_premise = self.tokenizer(

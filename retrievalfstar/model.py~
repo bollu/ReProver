@@ -260,8 +260,6 @@ class PremiseRetriever(pl.LightningModule):
             all_pos_premise_names = all_pos_premise_names_batched[bix]
             all_pos_premise_names_set = set(all_pos_premise_names)
             retrieved_premises = retrieved_premises_batched[bix]
-            if len(all_pos_premise_names) > 0:
-                num_with_premises += 1
 
             if bix == 0:
                 logger.info(f"Retrieved premises: '{','.join(retrieved_premises)}'")
@@ -322,14 +320,6 @@ class PremiseRetriever(pl.LightningModule):
         NDCG_logged = float(np.mean(collator.NDCGs))
         logger.info(f"NDCGS: {collator.NDCGs} | mean: {NDCG_logged}")
         logger.info(f"RRs: {collator.RRs} | mean: {np.mean(collator.RRs)}")
-        logger.info(f"num_with_premises: {num_with_premises}")
-
-
-        # what are they, children? unable to handle a zero denominator in the
-        # case where we get everything in a batch has zero premises...
-        if num_with_premises == 0:
-            logger.warn("got validation batch where no sample had any positive premises!")
-            num_with_premises = 1
 
         self.log(
             "MRR",
@@ -341,7 +331,7 @@ class PremiseRetriever(pl.LightningModule):
 
         self.log(
             "NDCG",
-            np.mean(collator.NDCGs),
+            42.0,
             on_epoch=True,
             sync_dist=True,
             batch_size=num_with_premises,

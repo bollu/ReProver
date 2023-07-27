@@ -25,11 +25,11 @@ trainer:
         verbose: true
         save_top_k: 1
         save_last: true
-        monitor: Recall@10_val
+        monitor: NDCG
         mode: max
     - class_path: pytorch_lightning.callbacks.EarlyStopping
       init_args:
-        monitor: Recall@10_val
+        monitor: NDCG
         patience: 3
         mode: max
         verbose: true
@@ -43,11 +43,11 @@ model:
 
 data:
   data_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data  # why do I need this?
-  corpus_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/corpus.json
-  import_graph_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/file_import_graph.json
+  corpus_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/corpus_everest.json
+  import_graph_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/file_import_graph_everest.json
   num_negatives: 3
   num_in_file_negatives: 1
-  batch_size: 32
-  eval_batch_size: 128
-  max_seq_len: 1024
+  batch_size: 2
+  eval_batch_size: 2
+  max_seq_len: 512
   num_workers: 4

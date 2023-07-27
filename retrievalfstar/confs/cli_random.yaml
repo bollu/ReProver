@@ -25,11 +25,11 @@ trainer:
         verbose: true
         save_top_k: 1
         save_last: true
-        monitor: Recall@10_val
+        monitor: NDCG
         mode: max
     - class_path: pytorch_lightning.callbacks.EarlyStopping
       init_args:
-        monitor: Recall@10_val
+        monitor: NDCG
         patience: 3
         mode: max
         verbose: true
