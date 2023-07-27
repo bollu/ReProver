@@ -28,8 +28,12 @@ pp = pprint.PrettyPrinter(indent=2)
 @dataclass 
 class Location:
     start_line : int 
-    start_col  : int 
+    start_col  : int
+    file_path : str
     file_name  : str
+    def __str__(self): return f"{self.file_name}:{self.start_line}"
+    def __hash__(self): return hash((self.start_line, self.start_col, self.file_name))
+    def __repr__(self): return self.__str__()
     
 class Corpus:
     data_path : str
@@ -38,17 +42,20 @@ class Corpus:
 
     corpus : List[Dict[str, Any]] # TODO: parse
     name2corpusix : Dict[str, int]
-    file_graph: nx.DiGraph
-    transitive_file_graph : nx.DiGraph
+    file2names : Dict[str, Set[str]] #mapping from filename to premise names that occur in this file.
+    file2import: nx.DiGraph
+    file2imports_transitive : nx.DiGraph
+    all_premise_names = List[str]
 
-    premise_names = List[str]
-
-    def __init__(self, data_path: str, corpus_path: str, import_graph_path: str):
+    def __init__(self, corpus_path: str, import_graph_path: str):
         self.corpus = Corpus.load_corpus(corpus_path)
-        self.name2corpusix = Corpus.build_corpus_index(self.corpus)
-        self.premise_names = Corpus.build_premise_index(self.corpus, self.name2corpusix)
-        self.file_graph = Corpus.load_file_dag(import_graph_path)
-        self.transitive_file_graph = nx.transitive_closure(self.file_graph)
+        self.name2corpusix = Corpus.build_name2ix(self.corpus)
+        self.file2names = Corpus.build_file2names(self.corpus)
+        self.all_premise_names = Corpus.build_premise_index(self.corpus, self.name2corpusix)
+        self.file2import = Corpus.load_file_dag(import_graph_path)
+        logger.info("building transitive file loading graph...")
+        self.file2imports_transitive = nx.transitive_closure(self.file2import, reflexive=True)
+        logger.info("built transitive file loading graph")
 
     @staticmethod
     def load_corpus(corpus_path: str) -> List[Dict[str, Any]]:
@@ -77,7 +84,7 @@ class Corpus:
         return all_premise_names
 
     @staticmethod
-    def build_corpus_index(corpus: List[Dict[str, Any]]) -> Dict[str, int]:
+    def build_name2ix(corpus: List[Dict[str, Any]]) -> Dict[str, int]:
         name2ix = dict()
         for (ix, record) in enumerate(corpus):
             name = record["name"]
@@ -93,9 +100,23 @@ class Corpus:
         return name2ix
 
     @staticmethod
+    def build_file2names(corpus: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        file2names = dict()
+        names = set()
+        for (ix, record) in enumerate(corpus):
+            # if record["name"] in names: continue
+            # names.add(record["name"])
+            file_name = pathlib.Path(record["file_name"]).stem
+            if file_name not in file2names: file2names[file_name] = set()
+            file2names[file_name].add(record["name"])
+        return file2names
+
+
+    @staticmethod
     def load_file_dag(import_graph_path: str) -> nx.DiGraph:
         g = nx.DiGraph()
         for record in json.load(open(import_graph_path)):
+            logger.info(record)
             g.add_node(record["name"])
             for imp in record["imports"]:
                 g.add_node(imp)
@@ -106,9 +127,10 @@ class Corpus:
         return self.name2corpusix.keys()
 
     def get_loc_from_defn(self, defn: Dict[str, Any]):
-        return Location(start_line=defn["start_line"],
-                            start_col=defn["start_col"],
-                            file_name=defn["file_name"])
+        return Location(start_line=int(defn["start_line"]),
+                            start_col=int(defn["start_col"]),
+                            file_path=defn["file_name"],
+                            file_name=pathlib.Path(defn["file_name"]).stem)
 
         
     def get_loc_for_name(self, name: str) -> Location:
@@ -116,18 +138,23 @@ class Corpus:
         return self.get_loc_from_defn(self.corpus[self.name2corpusix[name]])
 
     def occurs_before_loc(self, later : Location, earlier : Location) -> bool:
-        # if later imports earlier, then there is an edge f2 -> f1.
-        # if there is no edge, the later does not import earlier,
-        # and thus later does not occur before.
-        if not self.transitive_file_graph.has_edge(later, earlier):
-            return False 
+        """there are two bugs here: (1) we do not handle mutual, and (2) we should correctly handle fst versus fsti which we do not"""
+        # logger.info(f"#transitive imports of '{later.file_name}': '{self.file2imports_transitive.out_degree(later.file_name)}'")
+        # if there is no edge later -> earlier, then later does not import earlier.
+        # we cannot establish that later occurs after earlier. return false.
+        # they do not automatically edge reflexive edges :( 
+        if not self.file2imports_transitive.has_edge(later.file_name, earlier.file_name):
+            return False
+
         if later.file_name != earlier.file_name:
-            # later imports earlier, and thus it does occur before.
+            # later imports earlier and they are in different files., and thus it does occur before.
             return True
         else:
+            assert later.file_name == earlier.file_name
+            return True # HACK: this should actually take into account mutual definitions. For now, over-approximate and say that everything in the same file is reachable.
+            # they are in the same file, so check position
             # both in same file, must check position
-            return (later.start_line > earlier.start_line) or \
-                    (later.start_line == earlier.start_line and later.start_col > earlier.start_col)
+            # return (earlier.start_line <= later.start_line) 
 
     def occurs_before_loc_by_name(self, later_name : str, earlier_name : str) -> bool:
         """Returns if later_name definition occurs before earlier_name definition."""
@@ -139,6 +166,8 @@ class Corpus:
         return name + ":" + record["type"] + " := " + record["definition"]
 
     def get_ctx_embed_str_for_name(self, name: str) -> Dict[str, Any]: 
+        if name not in self.name2corpusix:
+            raise RuntimeError(f"expected to find context {name} in corpus information")
         assert name in self.name2corpusix
         record = self.corpus[self.name2corpusix[name]]
         return name + ":" + record["type"]
@@ -181,6 +210,14 @@ class RetrievalDataset(Dataset):
             assert ".jsonl" == ext
             return [json.loads(line) for line in open(path)]
 
+    def file_path_to_file_name(path : str) -> str: 
+        """
+        the file import graph only stores file names. So filter file paths into their 
+        names (without suffix) so we can correctly compute import inclusion
+        """
+        return pathlib.path(path).stem
+
+    # TODO: make this @staticmethod.
     def _load_data(self, data_path: str) -> List[Dict[str, Any]]:
         out_data = []
         logger.info(f"Loading data from '{data_path}'")
@@ -207,6 +244,11 @@ class RetrievalDataset(Dataset):
             if not know_all_premise_defs:
                 continue # skip this def cause its premise does not occur
             for pos_premise_name in all_pos_premise_names:
+                # check that the premise occurs earlier than the context.
+                if not self.corpus.occurs_before_loc_by_name(datum["name"], pos_premise_name):
+                    logger.error(f"premise '{pos_premise_name}' in file '{self.corpus.get_loc_for_name(pos_premise_name)}'")
+                    logger.error(f"^^ does not occur before context '{datum['name']}' in file '{self.corpus.get_loc_for_name(datum['name'])}'")
+                assert self.corpus.occurs_before_loc_by_name(datum["name"], pos_premise_name)
                 out_data.append({
                     "context_name": datum["name"],
                     "pos_premise_name": pos_premise_name,
@@ -229,30 +271,43 @@ class RetrievalDataset(Dataset):
         if not self.is_train:
             return self.data[idx]
 
+        # TODO: for now, do not bother taking in file negative samples, since we basically
+        # have no in-file information. 
+        # for p in self.corpus.names():
+        #     if p == ex["pos_premise_name"]: continue
+        #     # TODO: randomize this?
+        #     p_loc = self.corpus.get_loc_for_name(p)
+        #     pos_loc = self.corpus.get_loc_for_name(ex["pos_premise_name"])
+        #     if self.corpus.occurs_before_loc(p_loc, pos_loc):
+        #         if p_loc.file_name == pos_loc.file_name:
+        #             premises_in_file.append(p)
+        #         else:
+        #             premises_outside_file.append(p)
+        # num_in_file_negatives = min(len(premises_in_file), self.num_in_file_negatives)
+        # ex["neg_premises_names"] = random.sample(
+        #     premises_in_file, num_in_file_negatives
+        # ) + random.sample(
+        #     premises_outside_file, self.num_negatives - num_in_file_negatives
+        # )
+
         # In-file negatives + random negatives from all accessible premises.
         ex = deepcopy(self.data[idx])
         premises_in_file = []
         premises_outside_file = []
-
-        for p in self.corpus.names():
-            if p == ex["pos_premise_name"]: continue
-            # TODO: randomize this?
-            p_loc = self.corpus.get_loc_for_name(p)
-            pos_loc = self.corpus.get_loc_for_name(ex["pos_premise_name"])
-            if self.corpus.occurs_before_loc(p_loc, pos_loc):
-                if p_loc.file_name == pos_loc.file_name:
-                    premises_in_file.append(p)
-                else:
-                    premises_outside_file.append(p)
-
-        num_in_file_negatives = min(len(premises_in_file), self.num_in_file_negatives)
-
-        ex["neg_premises_names"] = random.sample(
-            premises_in_file, num_in_file_negatives
-        ) + random.sample(
-            premises_outside_file, self.num_negatives - num_in_file_negatives
-        )
-
+        cur_file_name = self.corpus.get_loc_for_name(ex["context_name"]).file_name
+        # collect all negative samples (TODO, HACK: for now, code is disabled).
+        # for next_file_name in self.corpus.file2imports_transitive.successors(cur_file_name):
+        #     if next_file_name not in self.corpus.file2names:
+        #        logger.warning(f"skipping successor {cur_file_name} -> {next_file_name}")
+        #        continue
+        #     assert next_file_name in self.corpus.file2names
+        #     premises_outside_file.extend([p for p in self.corpus.file2names[next_file_name] if p not in ex["all_pos_premise_names"]])
+	
+        if not premises_outside_file:
+               premises_outside_file = self.corpus.all_premise_names # HACK: just store all premise names
+               logger.error(f"unable to find premise outside file '{cur_file_name}'!")
+            
+        ex["neg_premise_names"] = random.sample(premises_outside_file, self.num_negatives)
         return ex
 
     def collate(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -260,16 +315,16 @@ class RetrievalDataset(Dataset):
         batch = dict()
 
         # Tokenize the context.
-        context = [self.corpus.get_ctx_embed_str_for_name(ex["context_name"]) for ex in examples]
+        context_names = [ex["context_name"] for ex in examples]
         tokenized_context = self.tokenizer(
-            [self.corpus. c.serialize_name_type() for c in context],
+            [self.corpus.get_ctx_embed_str_for_name(c) for c in context_names],
             padding="longest",
             max_length=self.max_seq_len,
             truncation=True,
             return_tensors="pt",
         )
-        batch["context_name"] = [ex["context_name"] for ex in examples]
-        batch["context"] = context
+        batch["context_name"] = context_names
+        batch["context"] = tokenized_context
         batch["context_ids"] = tokenized_context.input_ids
         batch["context_mask"] = tokenized_context.attention_mask
 
@@ -307,7 +362,7 @@ class RetrievalDataset(Dataset):
             batch["neg_premises"] = []
             batch["neg_premises_ids"] = []
             batch["neg_premises_mask"] = []
-
+            logger.warning(examples)
             for i in range(self.num_negatives):
                 neg_premise = [self.corpus.get_premise_embed_str_for_name(ex["neg_premise_names"][i]) for ex in examples]
                 tokenized_neg_premise = self.tokenizer(
@@ -359,17 +414,13 @@ class RetrievalDataModule(pl.LightningDataModule):
         self.eval_batch_size = eval_batch_size
         self.max_seq_len = max_seq_len
         self.num_workers = num_workers
-        self.corpus = Corpus(data_path=data_path, corpus_path=corpus_path, import_graph_path=import_graph_path)
+        self.corpus = Corpus(corpus_path=corpus_path, import_graph_path=import_graph_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    def prepare_data(self) -> None:
-        pass
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in (None, "fit", "test"):
             self.ds_train = RetrievalDataset(
                 [os.path.join(self.data_path, "train.json")],
-                # self.uses_lean4,
                 self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,
@@ -381,7 +432,6 @@ class RetrievalDataModule(pl.LightningDataModule):
         if stage in (None, "fit", "validate", "test"):
             self.ds_val = RetrievalDataset(
                 [os.path.join(self.data_path, "validate.json")],
-                # self.uses_lean4,
                 self.corpus,
                 self.num_negatives,
                 self.num_in_file_negatives,

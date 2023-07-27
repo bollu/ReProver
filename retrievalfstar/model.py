@@ -181,7 +181,7 @@ class PremiseRetriever(pl.LightningModule):
         """Re-index the retrieval corpus using the up-to-date encoder."""
         if not self.embeddings_staled:
             return
-        all_premise_names = self.trainer.datamodule.corpus.premise_names
+        all_premise_names = self.trainer.datamodule.corpus.all_premise_names
         logger.info("Re-indexing the retrieval corpus")
         logger.info(f"trainer: {pp.pformat(self.trainer)}")
         self.corpus_embeddings = torch.zeros(
@@ -216,7 +216,7 @@ class PremiseRetriever(pl.LightningModule):
         batch_context_names: List[str],
         batch_context_emb: torch.Tensor,
         k: int,
-    ) -> Tuple[List[List[Dict[str, Any]]], List[List[float]]]:
+    ) -> Tuple[List[List[str]], List[List[float]]]:
         """Perform a batch of nearest neighbour search. and returns the names of the closest premises"""
         similarities = self.linear_context(batch_context_emb) @ self.linear_premise(premise_embeddings).t()
         idxs_batch = similarities.argsort(dim=1, descending=True).tolist()
@@ -227,103 +227,136 @@ class PremiseRetriever(pl.LightningModule):
             for i in idxs:
                 premise_name = datamodule.corpus.all_premise_names[i]
                 # if p in accessible_premises:
-                if datamodule.corpus.occurs_before_loc_by_name(premise_name, ctx_name):
+                if datamodule.corpus.occurs_before_loc_by_name(ctx_name, premise_name):
                     results[j].append(premise_name)
                     scores[j].append(similarities[j, i].item())
                     if len(results[j]) >= k:
                         break
+
         return results, scores
 
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> None:
-        """Retrieve premises and calculate metrics such as Recall@K and MRR."""
-        # Retrieval.
-        # Who builds `batch`? There should be a `collate` that gets called
-        # by someone to build `batch`
+        """
+        Retrieve premises and calculate metrics such as Recall@K and MRR.
+        batch is build by datamodule.collate
+        """
         context_emb = self._encode(batch["context_ids"], batch["context_mask"])
         assert not self.embeddings_staled
-        # TODO: this depends on `corpus` because it filters to only find those
-        # premises which are currently reachable from the current corpus.
-        # It feels perverse to include this in the code.
-        # Feels like it artificially boosts the evaluation of the model (?)
-
-        # retrieved_premises, _ = self.corpus.get_nearest_premises(
-        #     self.corpus_embeddings,
-        #     batch["context"],
-        #     context_emb,
-        #     self.num_retrieved,
-        # )
-
-        retrieved_premises, _ = self.get_nearest_premises(
+        retrieved_premises_batched, _ = self.get_nearest_premises(
             self.trainer.datamodule,
             self.corpus_embeddings,
             batch["context_name"],
             context_emb,
             self.num_retrieved
         )
-
-        # Evaluation & logging.
-        recall = [[] for _ in range(self.num_retrieved)]
-        MRR = []
+        # TODO: also compute recall@k for all k
+        # recall = [[] for _ in range(self.num_retrieved)]
         num_with_premises = 0
-        tb = self.logger.experiment
-        # pp.pprint(f"batch: {batch.keys()}")
-        for i, (all_pos_premise_names, premises) in enumerate(
-            zip_strict(batch["pos_premise_name"], retrieved_premises)
-        ):
-            # Only log the first example in the batch.
-            if i == 0:
-                # msg_gt = "\n\n".join([p.serialize() for p in all_pos_premise_names])
-                msg_gt = "\n\n".join([p for p in all_pos_premise_names])
-                # msg_retrieved = "\n\n".join(
-                #     [f"{j}. {p.serialize()}" for j, p in enumerate(premises)]
-                # )
-                msg_retrieved = "\n\n".join(
-                    [f"{j}. {p}" for j, p in enumerate(premises)]
-                )
+        # tb = self.logger.experiment
+        collator = TestStatisticsCollator()
+        all_pos_premise_names_batched = batch["all_pos_premise_names"]
+        for bix in range(len(all_pos_premise_names_batched)):
+            all_pos_premise_names = all_pos_premise_names_batched[bix]
+            all_pos_premise_names_set = set(all_pos_premise_names)
+            retrieved_premises = retrieved_premises_batched[bix]
 
-                TP = len(set(premises).intersection(all_pos_premise_names))
-                if len(all_pos_premise_names) == 0:
-                    r = math.nan
-                else:
-                    r = float(TP) / len(all_pos_premise_names)
-                msg = f"Recall@{self.num_retrieved}: {r}\n\nGround truth:\n\n```\n{msg_gt}\n```\n\nRetrieved:\n\n```\n{msg_retrieved}\n```"
-                tb.add_text(f"premises_val", msg, self.global_step)
+            if bix == 0:
+                logger.info(f"Retrieved premises: '{','.join(retrieved_premises)}'")
+                logger.info(f"Positive premises: '{','.join(all_pos_premise_names)}'")
+            assert len(retrieved_premises) > 0
+            TP1 = retrieved_premises[0] in all_pos_premise_names
+            R1 = float(TP1) / len(all_pos_premise_names) * 100.0
+            collator.R1s.append(R1)
+            TP10 = len(all_pos_premise_names_set.intersection(retrieved_premises[:10]))
+            R10 = float(TP10) / len(all_pos_premise_names) * 100.0
+            collator.R10s.append(R10)
+            RR = 0
+            for j, p in enumerate(retrieved_premises):
+                if p in all_pos_premise_names:
+                    RR = (1.0 / (j + 1))
+                    break
+            collator.RRs.append(RR)
 
-            all_pos_premise_names = set(all_pos_premise_names)
-            if len(all_pos_premise_names) == 0:
-                continue
-            else:
-                num_with_premises += 1
-            first_match_found = False
+            # AP = integral_0^1 P(r) dr
+            # change of variables into k 
+            # let rel(k) = 1 if retrieved_premises[k] in all_pos_premises else 0
+            # let s(k) = sum_{j=0}^k rel(j)
+            # p(k) = s(k) / k
+            # r = s(k) / |all_pos_premises|
+            # dk = 1
+            # dr = (r(k + dk) -  r(k)) / dk 
+            #    = (r(k + 1) - r(k)) / 1
+            #    = rel(k+1) / |all_pos_premises|
+            # AP = integral_0^1 P(r) dr
+            #    = sum_0^N P(r(k)) dr(k)
+            #    = sum_0^N p(k) rel(k) / |all_pos_premises|
+            AP = 0
+            DCG = 0
+            IDCG = 0
+            
+            K_at_full_recall = np.nan # How to correctly initialize?
+            K_percent_at_full_recall = np.nan
+            ncorrect_at_j = 0
 
-            for j in range(self.num_retrieved):
-                TP = len(all_pos_premise_names.intersection(premises[: (j + 1)]))
-                recall[j].append(float(TP) / len(all_pos_premise_names))
-                if premises[j] in all_pos_premise_names and not first_match_found:
-                    MRR.append(1.0 / (j + 1))
-                    first_match_found = True
-            if not first_match_found:
-                MRR.append(0.0)
+            for j, p in enumerate(retrieved_premises):
+                discount = np.log2(j + 1) if j > 0 else 1
+                if j < len(all_pos_premise_names):
+                    IDCG += 1.0 / discount          
 
-        recall = [100 * np.mean(_) for _ in recall]
+                rel_at_j = int(p in all_pos_premise_names)
+                ncorrect_at_j += rel_at_j
 
-        for j in range(self.num_retrieved):
-            self.log(
-                f"Recall@{j+1}_val",
-                recall[j],
-                on_epoch=True,
-                sync_dist=True,
-                batch_size=num_with_premises,
-            )
+                if ncorrect_at_j == len(all_pos_premise_names):
+                    K_at_full_recall = j + 1
+                    K_percent_at_full_recall = K_at_full_recall / len(retrieved_premises)
+                DCG += rel_at_j / discount
+                p_at_j = ncorrect_at_j / (j + 1)
+                AP += p_at_j * rel_at_j
+            AP /= len(all_pos_premise_names)
+            collator.APs.append(AP)
+
 
         self.log(
             "MRR",
-            np.mean(MRR),
+            np.mean(collator.RRs),
             on_epoch=True,
             sync_dist=True,
             batch_size=num_with_premises,
         )
+
+        self.log(
+            "NDCG",
+            np.mean(collator.NDCGs),
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=num_with_premises,
+        )
+
+        self.log(
+            "MAP",
+            np.mean(collator.APs),
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=num_with_premises,
+        )
+
+        self.log(
+            "R1",
+            np.mean(collator.R1s),
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=num_with_premises,
+        )
+        
+        self.log(
+            "R10",
+            np.mean(collator.R10s),
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=num_with_premises,
+        )
+
 
     ##############
     # Testing    #
