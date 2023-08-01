@@ -27,6 +27,8 @@ import pathlib
 import inspect
 from retrievalfstar.datamodule import Corpus
 from torch.utils.data import Dataset, DataLoader
+import wandb
+import pretty_errors
 
 # embedding model parameters
 embedding_model = "text-embedding-ada-002"
@@ -333,6 +335,7 @@ class MyModel:
         for i in range(0, len(records), self.minibatch_size):
             logger.info(f".. ..minibatch[{i}:{i+self.minibatch_size}]")
             batch_loss = self.train_minibatch(records[i:i+self.minibatch_size])
+            wandb.log({"batch_loss": batch_loss})
             epoch_loss += batch_loss
             logger.info(f"epoch[0-1] {iepoch/self.nepoch:4.2f}, batch[0-1] {i/len(records):4.2f}, batch loss: {batch_loss:5.3f}, epoch_loss: {epoch_loss:5.3f}")
         # logger.info(f"epoch loss: {loss.item()}")
@@ -345,6 +348,8 @@ class MyModel:
             logger.info(f"..epoch end: {e}/{self.nepoch}, loss: {epoch_loss}")
             for callback in self.on_epoch_end_callbacks:
                 callback(model=self, epoch=e, epoch_loss=epoch_loss)
+            logger.info("testing at end of epoch {e}")
+            wandb.log(self.test())
 
 
     def test(self):
@@ -444,6 +449,7 @@ class MyModel:
         MAP = np.mean(collator.APs)
         NDCG = np.mean(collator.NDCGs)
         logger.info(f"** Eval on {self.validate_dataset} | R1[0-1]: {R1} , R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
+        return {"R1": R1, "R10": R10, "MAP": MAP, "NDCG": NDCG}
 
 def download(corpus_path : str, import_graph_path : str, embeds_path : str):
     corpus  = Corpus(corpus_path, import_graph_path)
@@ -523,6 +529,7 @@ class ModelSaver:
 
     def __call__(self, epoch : int, model: MyModel, epoch_loss : float):
         is_best_epoch =  epoch_loss < self.lowest_loss
+        wandb.log({"epoch_loss": epoch_loss})
         if is_best_epoch: 
             self.lowest_loss = epoch_loss
             save_path = self.model_path.parent / (self.model_path.stem + ".best" + self.model_path.suffix)
@@ -530,8 +537,8 @@ class ModelSaver:
             with gzip.open(save_path, "wb") as f:
                 pickle.dump(model.mk_pickle_dict(), f)
 
-        logger.info(f"***saving model @ epoch {epoch} to {save_path}***")
         save_path = self.model_path.parent / (self.model_path.stem + f".epoch{epoch}" + self.model_path.suffix)
+        logger.info(f"***saving model @ epoch {epoch} to {save_path}***")
         with gzip.open(save_path, "wb") as f:
             pickle.dump(model.mk_pickle_dict(), f)
 
@@ -545,6 +552,21 @@ def fit(model_path : str,
         minibatch_size : int, 
         microbatch_size : int,
         nepoch : int):
+    wandb.login()
+    run = wandb.init(
+    # Set the project where this run will be logged
+    project="premise-selection-code-embeddings-pretrained",
+    # Track hyperparameters and run metadata
+    config={
+        "corpus_path": corpus_path,
+        "import_graph_path":import_graph_path,
+        "embeds_path": embeds_path,
+        "data_dir": data_dir,
+        "minibatch_size": minibatch_size,
+        "microbatch_size":microbatch_size
+    })
+
+
     corpus  = Corpus(corpus_path, import_graph_path)
     logger.debug(f"loading embeds '{model_path}'...")
     with gzip.open(embeds_path, "rb") as f:
