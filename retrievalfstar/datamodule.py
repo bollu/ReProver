@@ -45,7 +45,8 @@ class Corpus:
     file2names : Dict[str, Set[str]] #mapping from filename to premise names that occur in this file.
     file2import: nx.DiGraph
     file2imports_transitive : nx.DiGraph
-    all_premise_names = List[str]
+    all_premise_names : List[str]
+    all_names_cache : List[str]
 
     def __init__(self, corpus_path: str, import_graph_path: str):
         self.corpus = Corpus.load_corpus(corpus_path)
@@ -55,6 +56,7 @@ class Corpus:
         self.file2import = Corpus.load_file_dag(import_graph_path)
         logger.info("building transitive file loading graph...")
         self.file2imports_transitive = nx.transitive_closure(self.file2import, reflexive=True)
+        self.all_names_cache = None
         logger.info("built transitive file loading graph")
 
     @staticmethod
@@ -82,6 +84,11 @@ class Corpus:
         logger.warning(f"SUMMARY  %premises added with defn: {100.0 * len(kept_premises)/(len(kept_premises) + len(skipped_premises)):2f}")
         # raise RuntimeError(f"done building premise index. %premises skipped: {100.0 * len(skipped_premises)/(len(kept_premises) + len(skipped_premises)):2f}")
         return all_premise_names
+
+    def all_names(self):
+        if not self.all_names_cache:
+            self.all_names_cache = sorted(list(self.name2corpusix .keys()))
+        return self.all_names_cache
 
     @staticmethod
     def build_name2ix(corpus: List[Dict[str, Any]]) -> Dict[str, int]:
