@@ -129,8 +129,9 @@ class Corpus:
                 g.add_edge(record["name"], imp)
         return g
 
-    def names(self) -> Iterable[str]:
-        return self.name2corpusix.keys()
+    # If in use, replace will all_names()
+    # def names(self) -> Iterable[str]:
+    #     return self.name2corpusix.keys()
 
     def get_loc_from_defn(self, defn: Dict[str, Any]):
         return Location(start_line=int(defn["start_line"]),

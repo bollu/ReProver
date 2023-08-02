@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import difflib
 import yaml
 import numpy as np
 from torch import nn
@@ -43,6 +44,7 @@ logger.debug("openAI models:")
 openai.Model.list()
 logger.debug("-----")
 
+OPENAI_NSKIPPED : int = 0
 def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int = 16):
     """
     batch the list of strings according to openAI batching rules,
@@ -51,6 +53,7 @@ def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int
     of the strings that were skipped as they are too long.
     TODO: consider giving this information eagerly.
     """
+    global OPENAI_NSKIPPED
     # actual max tokens is 8192
     skipped = []
     ix = 0
@@ -60,6 +63,7 @@ def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int
         while ix < len(strings) and len(batch) < batch_size:
 
             if len(strings[ix]) >= max_tokens:
+                OPENAI_NSKIPPED += 1
                 logger.error("string too long, skipping string at index '{ix}'")
                 ix += 1 
 
@@ -73,6 +77,8 @@ def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int
             ix += 1
 
         logger.debug(f"yielding batch")
+        if batch == []:
+            continue # return back to the top if batch is insufficient.
         yield batch
 
 
@@ -88,6 +94,7 @@ def aos_to_soa(examples: List[Dict[str, Any]]) -> Dict[str, Any]:
 class PretrainedDataset(Dataset):
     data_path : str 
     corpus : Corpus 
+    embedded_strings : List[str] # names for which we have embeddings
     num_negatives : int
     is_train : bool
     def __init__(
@@ -97,6 +104,7 @@ class PretrainedDataset(Dataset):
         is_train: bool,
         num_negatives : int,
         num_in_file_negatives : int,
+        embedded_strings : List[str]
     ) -> None:
         super().__init__()
         self.corpus = corpus
@@ -106,7 +114,8 @@ class PretrainedDataset(Dataset):
         assert len(data_paths) == 1
         data_path = data_paths[0]
         self.data_path = data_path
-        self.data = PretrainedDataset._load_data(corpus=self.corpus, data_path=data_paths[0])
+        self.embedded_strings = embedded_strings
+        self.data = PretrainedDataset._load_data(corpus=self.corpus, data_path=data_paths[0], embedded_strings=self.embedded_strings)
         # self.data = list(
         #     itertools.chain.from_iterable(
         #         PretrainedDataset._load_data(corpus=self.corpus, data_path=path) for path in data_paths
@@ -135,31 +144,46 @@ class PretrainedDataset(Dataset):
 
     # TODO: make this @staticmethod.
     @staticmethod
-    def _load_data(corpus : Corpus, data_path: str) -> List[Dict[str, Any]]:
+    def _load_data(corpus : Corpus, data_path: str, embedded_strings: List[str]) -> List[Dict[str, Any]]:
         out_data = []
         logger.info(f"Loading data from '{data_path}'")
         in_data = PretrainedDataset.load_json_or_jsonl(data_path)
         for (i, datum) in tqdm(enumerate(in_data)):
             if i == 0:
                 logger.info(f"loading datum with keys '{datum.keys()}'")
-            logger.info(f"loading '{i}'th data from '{data_path}'. keys: '{datum.keys()}'")
-            if not corpus.has_definition_for_name(datum["name"]):
+            # logger.info(f"loading '{i}'th data from '{data_path}'. keys: '{datum.keys()}'")
+            if not corpus.has_definition_for_name(datum["name"]) or datum["name"] not in corpus.all_names():
                 logger.warning(f"skipping defn '{datum['name']}' as we do not have definition")
                 continue
+
+            ctx_def = corpus.get_ctx_embed_str_for_name(datum["name"])
+            if ctx_def not in embedded_strings:
+                logger.warning(f"skipping defn '{datum['name']}' as we do not have embedding")
+                continue
+
             # TODO: refactor this to be way flatter.
             # context = Context(name=datum["name"],
             #     type_=datum["type"],
             #     definition=datum["definition"])
             # all premises that are *used* in the tactic.
-            all_pos_premise_names = datum["premises"]
             # only keep those premise names that don't occur in the ctx embedding.
-            all_pos_premise_names = \
-                    [p for p in datum["premises"] if p not in corpus.get_ctx_embed_str_for_name(datum["name"])]
-            if not all_pos_premise_names:
+            all_pos_premise_names = [p for p in datum["premises"] if p not in ctx_def]
+            if  len(all_pos_premise_names) == 0:
                 continue # skip this def cause it has zero premises
-            know_all_premise_defs = all([corpus.has_definition_for_name(p) for p in all_pos_premise_names])
-            if not know_all_premise_defs:
-                continue # skip this def cause its premise does not occur
+
+            skip = False
+            for p in all_pos_premise_names:
+                if p not in corpus.all_names(): 
+                    skip = True; 
+                    break;
+                if not corpus.has_definition_for_name(p):
+                    skip = True;
+                    break;
+                if not corpus.get_premise_embed_str_for_name(p) in embedded_strings:
+                    skip = True;
+                    break
+            if skip: continue
+
             for pos_premise_name in all_pos_premise_names:
                 # check that the premise occurs earlier than the context.
                 if not corpus.occurs_before_loc_by_name(datum["name"], pos_premise_name):
@@ -189,7 +213,11 @@ class PretrainedDataset(Dataset):
         if not self.is_train:
             return self.data[idx]
         # In-file negatives + random negatives from all accessible premises.
-        exs = self.data[idx]
+        logger.info(f"idx: {idx} | type: {type(idx)} | is int: {isinstance(idx, int)}")
+        if isinstance(idx, int):
+            exs = [self.data[idx]]
+        else:
+            exs = self.data[idx]
         exs = deepcopy(exs)
         for ex in exs:
             premises_in_file = []
@@ -200,8 +228,14 @@ class PretrainedDataset(Dataset):
                    premises_outside_file = self.corpus.all_premise_names # HACK: just store all premise names
                    logger.error(f"unable to find premise outside file '{cur_file_name}'!")
 
-            ex["neg_premise_names"] = random.sample(premises_outside_file, self.num_negatives)
-        return exs
+            neg_premise_names = random.sample(premises_outside_file, self.num_negatives)
+            # only keep those negative embeddings which have emdataset/QUIC.Spec.Lemmas.jsonbeddings fo them.
+            neg_premise_names = [n for n in neg_premise_names if self.corpus.get_premise_embed_str_for_name(n) in self.embedded_strings]
+            ex["neg_premise_names"] = neg_premise_names
+        if isinstance(idx, int):
+            return exs[0]
+        else:
+            return exs
 
 
 
@@ -249,6 +283,7 @@ class MyModel:
     minibatch_size : int
     microbatch_size : int
     nepoch : int 
+    embedded_strings : List[str] # names for which we have embeddings
     ctx_projection : nn.Module
     premise_projection : nn.Module
     on_epoch_end_callbacks : List[Callable] # callback args: (model=MyModel, epoch_loss=epoch_los)
@@ -260,7 +295,9 @@ class MyModel:
                  validate_dataset : PretrainedDataset,
                  nepoch : int,
                  minibatch_size : int,
-                 microbatch_size : int): 
+                 microbatch_size : int,
+                 embedded_strings : List[str]): 
+        self.embedded_strings = embedded_strings
         self.corpus = corpus
         self.embeddings = embeddings
         self.nepoch = nepoch
@@ -282,6 +319,7 @@ class MyModel:
     def train_microbatch(self, data: List[Dict[str, Any]]) -> torch.Tensor:
         ctx_names = [d["context_name"] for d in data]
         premise_names = [d["pos_premise_name"] for d in data]
+
         for d in data:
             premise_names.extend(d["neg_premise_names"])
 
@@ -293,8 +331,10 @@ class MyModel:
         premises = [] # NPREMISES x DOPENAI_EMBED
         # logger.info(f"known embeds: {self.embeddings.keys()}")
         for (ic, c) in enumerate(ctx_names):
+            assert c in self.corpus.all_names()
             ctxs.append(self.embeddings[self.corpus.get_ctx_embed_str_for_name(c)].reshape(1, -1))
         for (ip, p) in enumerate(premise_names):
+            assert p in self.corpus.all_names()
             premises.append(self.embeddings[self.corpus.get_premise_embed_str_for_name(p)].reshape(1, -1))
 
         for (ic, c) in enumerate(ctx_names):
@@ -356,7 +396,7 @@ class MyModel:
         logger.info(f"running evaluation on {self.validate_dataset}")
         collator = TestStatisticsCollator()
 
-        ix2premise_name = list(self.corpus.all_premise_names)
+        ix2premise_name = [name for name in self.corpus.all_premise_names if self.corpus.get_premise_embed_str_for_name(name) in self.embedded_strings]
         ix2premise = [self.corpus.get_premise_embed_str_for_name(name) for name in ix2premise_name]
         premise2ix = { ix2premise[ix] : ix for ix in range(len(ix2premise)) }
         # NBATCH x OPENAI_EMBED_DIM
@@ -474,8 +514,7 @@ def download(corpus_path : str, import_graph_path : str, embeds_path : str):
         strings.add(premise)
 
     logger.debug("done querying. Now building gzip record")
-    strings = list(strings) # is this deterministic? probably not.
-    strings.sort()
+    strings = sorted(list(strings)) # is this deterministic? probably not.
     for strings_batch in tqdm(list(openai_batch(strings)), desc="building openAI embeddings"):
         assert len(strings_batch)
         # logger.info(f"vvbatch size: {len(strings_batch)}vv")
@@ -572,23 +611,29 @@ def fit(model_path : str,
     with gzip.open(embeds_path, "rb") as f:
         loaded = pickle.load(f)
         embeds = loaded["embeds"]
-    logger.info(f"load embeds. {len(list(embeds.keys()))}")
+
+    assert embeds is not None
+    embedded_strings = list(embeds.keys())
+    logger.info(f"load embeds. {len(embedded_strings)}")
 
     logger.info(f"starting model training from path '{data_dir}'")
-    assert embeds is not None
     model = MyModel(corpus=corpus,
                   embeddings=embeds,
                   minibatch_size=minibatch_size,
                   microbatch_size=microbatch_size,
                   nepoch=nepoch,
+                  embedded_strings=embedded_strings,
                   train_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
                                                   corpus=corpus,
                                                   is_train=True,
-                                                  num_negatives=2, num_in_file_negatives=1),
+                                                  num_negatives=2, num_in_file_negatives=1,
+                                                  embedded_strings=embedded_strings),
                   validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
                                                      corpus=corpus,
                                                      is_train=False,
-                                                     num_negatives=0, num_in_file_negatives=0))
+                                                     num_negatives=0,
+                                                     num_in_file_negatives=0,
+                                                    embedded_strings=embedded_strings))
     logger.info(f"training model...")
     model.on_epoch_end_callbacks.append(ModelSaver(model_path))
     model.train()
@@ -621,20 +666,96 @@ def test(model_path : str,
                   minibatch_size=minibatch_size,
                   microbatch_size=microbatch_size,
                   nepoch=nepoch,
+                  embedded_strings=embedded_strings,
                   train_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
                                                   corpus=corpus,
                                                   is_train=True,
-                                                  num_negatives=2, num_in_file_negatives=1),
+                                                  num_negatives=2, num_in_file_negatives=1,
+                                                  embedded_strings=embedded_strings),
                   validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
                                                      corpus=corpus,
                                                      is_train=False,
-                                                     num_negatives=0, num_in_file_negatives=0))
+                                                     num_negatives=0,
+                                                     num_in_file_negatives=0,
+                                                    embedded_strings=embedded_strings))
     logger.info(f"loading model from {model_path}...")
     with gzip.open(model_path, "rb") as f:
         model.load_pickle_dict(pickle.load(f))
     logger.info(f"loaded model.")
     model.test()
 
+
+def debug_missing_key(model_path : str, 
+        corpus_path : str, 
+        import_graph_path : str,
+        embeds_path : str,
+        data_dir : str,
+        minibatch_size : int, 
+        microbatch_size : int,
+        nepoch : int):
+    corpus  = Corpus(corpus_path, import_graph_path)
+    logger.debug(f"loading embeds '{model_path}'...")
+
+
+    strings = set()
+    # check how many we skip
+    for name in tqdm(corpus.all_names(), desc="querying openAI"):
+        logger.info(f"processing '{name}'")
+        ctx = corpus.get_ctx_embed_str_for_name(name)
+        premise = corpus.get_premise_embed_str_for_name(name)
+        strings.add(ctx)
+        strings.add(premise)
+
+    logger.debug("done querying. Now building gzip record")
+    strings = sorted(list(strings)) # is this deterministic? probably not.
+    for strings_batch in tqdm(list(openai_batch(strings)), desc="building openAI embeddings"):
+        pass
+    print(f"#strings skipped by OpenAI batching: {OPENAI_NSKIPPED:20d} | percentage: {OPENAI_NSKIPPED / len(strings) * 100.0:4.2f}")
+    _ = input("press key to continue>")
+
+    with gzip.open(embeds_path, "rb") as f:
+        loaded = pickle.load(f)
+        embeds = loaded["embeds"]
+
+
+
+    # seach for missing keys from corpus
+    logger.info(f"===searching for missing names in corpus=====")
+    tofind = []
+    for name in tqdm(corpus.all_names(), desc="building names dict"):
+        tofind.append(corpus.get_ctx_embed_str_for_name(name))
+        tofind.append(corpus.get_premise_embed_str_for_name(name))
+
+    missing_names = sorted(list(set([n for n in tofind if n not in embeds.keys()])))
+    print(f"#names missing from corpus: {len(missing_names)}")
+    for missing_name in tqdm(missing_names, desc="missing names search close match"):
+        logger.info(f"===searching for close matches to {missing_name[:30]}===")
+        for (ix, known_name) in enumerate(embeds.keys()):
+            if missing_name[:256] in known_name:
+                print(f"found matching name at ix: {ix:5d}")
+                # diff = difflib.context_diff(known_name, missing_name)
+                # print(''.join(diff), end="")
+
+
+    logger.info(f"===searching for missing names in train dataset=====")
+    train_dataset = PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
+                                    corpus=corpus,
+                                    is_train=True,
+                                    num_negatives=2, num_in_file_negatives=1)
+    tofind = []
+    for record in tqdm(train_dataset):
+        print(f"record: {record}")
+        tofind.append(corpus.get_ctx_embed_str_for_name(record["context_name"]))
+        tofind.append(corpus.get_premise_embed_str_for_name(record["pos_premise_name"]))
+    missing_names = sorted(list(set([n for n in tofind if n not in embeds.keys()])))
+    print(f"#names missing from dataset: {len(missing_names)}")
+    for missing_name in tqdm(missing_names, desc="missing names search close match"):
+        logger.info(f"===searching for close matches to name missing in dataset {missing_name[:30]}===")
+        for (ix, known_name) in enumerate(embeds.keys()):
+            if missing_name[:256] in known_name:
+                print(f"found matching name at ix: {ix:5d}")
+                # diff = difflib.context_diff(known_name, missing_name)
+                # print(''.join(diff), end="")
 
 def call_fn_with_dict(f : Callable, d : Dict[str, Any]):
     sig = inspect.signature(f)
@@ -663,6 +784,8 @@ def toplevel(args):
         opts_test = opts_all["test"]
         opts = {**opts_common, **opts_test}
         call_fn_with_dict(test, opts)
+    elif args.command =="debug_missing_key":
+        call_fn_with_dict(debug_missing_key, opts_common)
     else:
         logger.error(f"ERROR: expected one of 'download' or 'test' commands, found: '{args.command}'")
         sys.exit(1)
@@ -685,6 +808,10 @@ def main():
     # run cosine similarity.
     test = subparsers.add_parser('test')
     test.set_defaults(command="test")
+
+    # run cosine similarity.
+    test = subparsers.add_parser('debug_missing_key')
+    test.set_defaults(command="debug_missing_key")
 
     args = parser.parse_args()
     toplevel(args)
