@@ -44,6 +44,9 @@ logger.debug("openAI models:")
 openai.Model.list()
 logger.debug("-----")
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(device)
+
 OPENAI_NSKIPPED : int = 0
 def openai_batch(strings :  List[str], max_tokens : int = 3000, batch_size : int = 16):
     """
@@ -313,6 +316,12 @@ class MyModel:
         self.optimizer = None
         self.lrscheduler = None
 
+    def to(self, device):
+        self.ctx_projection.to(device)
+        self.premise_projection.to(device)
+        for name in self.embeddings:
+            self.embeddings[name] = self.embeddings[name].to(device)
+
     def parameters(self):
         return list(self.ctx_projection.parameters()) + list(self.premise_projection.parameters())
 
@@ -322,6 +331,8 @@ class MyModel:
     def load_pickle_dict(self, d):
         self.ctx_projection.load_state_dict(d["ctx_projection"])
         self.premise_projection.load_state_dict(d["premise_projection"])
+        self.ctx_projection = self.ctx_projection.to(device)
+        self.premise_projection = self.premise_projection.to(device)
 
     def train_microbatch(self, data: List[Dict[str, Any]]) -> torch.Tensor:
         ctx_names = [d["context_name"] for d in data]
@@ -350,9 +361,9 @@ class MyModel:
                 labels[ic].append(float(p in data[ic]["all_pos_premise_names"]))
             labels[ic] = torch.tensor(labels[ic]).reshape(1, -1)
 
-        ctxs = torch.cat(ctxs, axis=0)
-        premises = torch.cat(premises, axis=0)
-        labels = torch.cat(labels, axis=0)
+        ctxs = torch.cat(ctxs, axis=0).to(device)
+        premises = torch.cat(premises, axis=0).to(device)
+        labels = torch.cat(labels, axis=0).to(device)
 
         logger.info(f"ctxs: {ctxs.shape} | premises: {premises.shape} | labels: {labels.shape}")
         # | ctx_embed: {ctx_embed.shape} | premise_embed: {premise_embed.shape} | dots: {dots.shape}")
@@ -392,7 +403,8 @@ class MyModel:
         return epoch_loss
 
     def train(self):
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-2)
+        # self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-2)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
         self.lrscheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0 = 1, T_mult=2)
         for e in range(self.nepoch):
             logger.info(f"..epoch: {e}/{self.nepoch}")
@@ -417,7 +429,7 @@ class MyModel:
         ix2premise = [self.corpus.get_premise_embed_str_for_name(name) for name in ix2premise_name]
         premise2ix = { ix2premise[ix] : ix for ix in range(len(ix2premise)) }
         # NBATCH x OPENAI_EMBED_DIM
-        all_premises_embeds = torch.cat([self.embeddings[ix2premise[ix]].view(1, -1) for ix in range(len(ix2premise)) ], axis=0)
+        all_premises_embeds = torch.cat([self.embeddings[ix2premise[ix]].view(1, -1) for ix in range(len(ix2premise)) ], axis=0).to(device)
         # NBATCH x OUR_EMBED_DIM
         all_premises_embeds = self.premise_projection(all_premises_embeds)
         logger.info("all_premises_embeds: {all_premises_embeds}")
@@ -426,7 +438,7 @@ class MyModel:
 
         for record in tqdm(self.validate_dataset, desc=f"evaluation on {self.validate_dataset}"):
             # 1 x OPENAI_EMBED_DIM
-            ctx_embed = self.embeddings[self.corpus.get_ctx_embed_str_for_name(record["context_name"])]
+            ctx_embed = self.embeddings[self.corpus.get_ctx_embed_str_for_name(record["context_name"])].to(device)
             # 1 x OUR_EMBED_DIM
             ctx_embed = self.ctx_projection(ctx_embed)
             # OUR_EMBED_DIM
@@ -675,6 +687,7 @@ def fit(model_dir : str,
                                                      num_negatives=0,
                                                      num_in_file_negatives=0,
                                                     embedded_strings=embedded_strings))
+    model.to(device)
     logger.info(f"training model...")
     os.makedirs(model_dir, exist_ok=True)
     model.on_epoch_end_callbacks.append(ModelSaver(model_dir))
@@ -863,6 +876,6 @@ def main():
     toplevel(args)
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(42)
+    np.random.seed(42)
     main()
