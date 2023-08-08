@@ -439,12 +439,6 @@ class MyModel:
             all_pos_premise_names = record["all_pos_premise_names"]
             all_pos_premise_names_set = set(all_pos_premise_names)
             retreived_premise_names = [ix2premise_name[ix2rank[i]] for i in range(len(ix2rank))]
-            examples.append({
-                "context_name": record["context_name"],
-                "all_pos_premise_names": record["all_pos_premise_names"],
-                "retreived_premise_names": retreived_premise_names[:30], # only keep 30, otherwise this gets too large.
-            })
-
             # TODO: filter by accessible premises.
             TP1 = retreived_premise_names[0] in all_pos_premise_names
             R1 = float(TP1) / 1
@@ -505,14 +499,28 @@ class MyModel:
             collator.Ks_at_full_recall.append(K_at_full_recall)
             collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
 
+            examples.append({
+                "context_name": record["context_name"],
+                "all_pos_premise_names": record["all_pos_premise_names"],
+                "retreived_premise_names": retreived_premise_names[:30], # only keep 30, otherwise this gets too large.
+                "TP1" : TP1,
+                "TP10": TP10,
+                "R10" : R10,
+                "R1" : R1,
+                "NDCG": NDCG,
+                "RR" : RR,
+                "AP": AP
+            })
+
         # finish processing all records.
         # average NDCG
         R1 = np.mean(collator.R1s)
         R10 = np.mean(collator.R10s)
         MAP = np.mean(collator.APs)
         NDCG = np.mean(collator.NDCGs)
-        logger.info(f"** Eval on {self.validate_dataset} | R1[0-1]: {R1} , R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
-        collated = {"R1": R1, "R10": R10, "MAP": MAP, "NDCG": NDCG}
+        RR = np.mean(collator.RRs)
+        logger.info(f"** Eval on {self.validate_dataset} | R1[0-1]: {R1} , RR[0-1]: {RR}, R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
+        collated = {"R1": R1, "R10": R10, "MAP": MAP, "NDCG": NDCG, "RR" : RR}
         return examples, collated
 
 def download(corpus_path : str, import_graph_path : str, embeds_path : str):
@@ -855,4 +863,6 @@ def main():
     toplevel(args)
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
+    np.random.seed(0)
     main()
