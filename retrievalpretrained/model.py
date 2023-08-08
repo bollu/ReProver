@@ -287,6 +287,8 @@ class MyModel:
     ctx_projection : nn.Module
     premise_projection : nn.Module
     on_epoch_end_callbacks : List[Callable] # callback args: (model=MyModel, epoch_loss=epoch_los)
+    optimizer : torch.optim.Optimizer
+    lrscheduler : torch.optim.lr_scheduler.LRScheduler
 
     def __init__(self,
                  corpus : Corpus,
@@ -308,6 +310,11 @@ class MyModel:
         self.ctx_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN)
         self.premise_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN)
         self.on_epoch_end_callbacks = []
+        self.optimizer = None
+        self.lrscheduler = None
+
+    def parameters(self):
+        return list(self.ctx_projection.parameters()) + list(self.premise_projection.parameters())
 
     def mk_pickle_dict(self):
         return { "ctx_projection" : self.ctx_projection.state_dict(), "premise_projection" : self.premise_projection.state_dict() }
@@ -362,11 +369,13 @@ class MyModel:
         return loss
 
     def train_minibatch(self, records: List[Dict[str, Any]]) -> float:
+        self.optimizer.zero_grad()
         loss = 0
         for i in range(0, len(records), self.microbatch_size):
             loss += self.train_microbatch(records[i:i+self.microbatch_size])
         loss.backward()
         loss_val = loss.item()
+        self.optimizer.step()
         del loss
         return loss_val
 
@@ -378,21 +387,29 @@ class MyModel:
             wandb.log({"batch_loss": batch_loss})
             epoch_loss += batch_loss
             logger.info(f"epoch[0-1] {iepoch/self.nepoch:4.2f}, batch[0-1] {i/len(records):4.2f}, batch loss: {batch_loss:5.3f}, epoch_loss: {epoch_loss:5.3f}")
+            self.lrscheduler.step(iepoch + i / len(records))
         # logger.info(f"epoch loss: {loss.item()}")
         return epoch_loss
 
     def train(self):
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-2)
+        self.lrscheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0 = 1, T_mult=2)
         for e in range(self.nepoch):
             logger.info(f"..epoch: {e}/{self.nepoch}")
             epoch_loss = self.train_epoch(e, self.train_dataset)
+            wandb.log({"epoch_loss": epoch_loss})
             logger.info(f"..epoch end: {e}/{self.nepoch}, loss: {epoch_loss}")
+            examples, validation = self.test()
             for callback in self.on_epoch_end_callbacks:
-                callback(model=self, epoch=e, epoch_loss=epoch_loss)
+                callback(model=self, epoch=e, epoch_loss=epoch_loss, examples=examples, validation=validation)
             logger.info("testing at end of epoch {e}")
-            wandb.log(self.test())
+            wandb.log(validation)
 
 
-    def test(self):
+    def test(self) -> (Dict[str, Any], Dict[str, Any]):
+        """
+        return a tuple, consisting of (a) the examples, and (b) the final validation losses.
+        """
         logger.info(f"running evaluation on {self.validate_dataset}")
         collator = TestStatisticsCollator()
 
@@ -405,6 +422,7 @@ class MyModel:
         all_premises_embeds = self.premise_projection(all_premises_embeds)
         logger.info("all_premises_embeds: {all_premises_embeds}")
         # premises indexed by ix.
+        examples = []
 
         for record in tqdm(self.validate_dataset, desc=f"evaluation on {self.validate_dataset}"):
             # 1 x OPENAI_EMBED_DIM
@@ -421,6 +439,11 @@ class MyModel:
             all_pos_premise_names = record["all_pos_premise_names"]
             all_pos_premise_names_set = set(all_pos_premise_names)
             retreived_premise_names = [ix2premise_name[ix2rank[i]] for i in range(len(ix2rank))]
+            examples.append({
+                "context_name": record["context_name"],
+                "all_pos_premise_names": record["all_pos_premise_names"],
+                "retreived_premise_names": retreived_premise_names[:30], # only keep 30, otherwise this gets too large.
+            })
 
             # TODO: filter by accessible premises.
             TP1 = retreived_premise_names[0] in all_pos_premise_names
@@ -489,7 +512,8 @@ class MyModel:
         MAP = np.mean(collator.APs)
         NDCG = np.mean(collator.NDCGs)
         logger.info(f"** Eval on {self.validate_dataset} | R1[0-1]: {R1} , R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
-        return {"R1": R1, "R10": R10, "MAP": MAP, "NDCG": NDCG}
+        collated = {"R1": R1, "R10": R10, "MAP": MAP, "NDCG": NDCG}
+        return examples, collated
 
 def download(corpus_path : str, import_graph_path : str, embeds_path : str):
     corpus  = Corpus(corpus_path, import_graph_path)
@@ -560,30 +584,38 @@ def test(ckpt_path : str, data_path : str, eval_batch_size : int):
     # logger.info(f"loaded pickle! model #strings: '{len(model.strings)}'")
 
 class ModelSaver:
-    model_path : pathlib.Path
-    lowest_loss : float
-    def __init__(self, model_path : str):
-        self.model_path = pathlib.Path(model_path)
-        self.lowest_loss = np.inf
+    model_dir : pathlib.Path
+    prev_optimal : float
+    def __init__(self, model_dir : str):
+        self.model_dir = pathlib.Path(model_dir)
+        self.prev_optimal = -np.inf 
 
-    def __call__(self, epoch : int, model: MyModel, epoch_loss : float):
-        is_best_epoch =  epoch_loss < self.lowest_loss
-        wandb.log({"epoch_loss": epoch_loss})
-        if is_best_epoch: 
-            self.lowest_loss = epoch_loss
-            save_path = self.model_path.parent / (self.model_path.stem + ".best" + self.model_path.suffix)
-            logger.info(f"***saving best model to {save_path}***")
-            with gzip.open(save_path, "wb") as f:
+    def __call__(self, epoch : int, model: MyModel, epoch_loss : float, examples : Dict[str, Any], validation : Dict[str, Any]):
+        os.makedirs(self.model_dir, exist_ok=True)
+        cur_val = validation["NDCG"]
+        is_cur_best = cur_val > self.prev_optimal  # NDCG should _increase_ not _decrease_, jesus.
+        if is_cur_best: 
+            prev_optimal = self.prev_optimal
+            self.prev_optimal = cur_val
+            save_path = self.model_dir / "best.pickle.gz"
+            logger.info(f"***saving best model (cur: '{cur_val:4.2f}' < prev: '{prev_optimal:4.2f}') to '{save_path}' ***")
+            with gzip.open(save_path, "w") as f:
                 pickle.dump(model.mk_pickle_dict(), f)
 
-        save_path = self.model_path.parent / (self.model_path.stem + f".epoch{epoch}" + self.model_path.suffix)
-        logger.info(f"***saving model @ epoch {epoch} to {save_path}***")
+            record_path = self.model_dir / "best.record.json"
+            with open(record_path, "w") as f:
+                json.dump({ "examples": examples, "validation": validation}, f, indent=1)
+
+        save_path = self.model_dir / f"epoch-{epoch}.pickle.gz"
+        logger.info(f"***saving model @ epoch '{epoch}' to '{save_path}'***")
         with gzip.open(save_path, "wb") as f:
             pickle.dump(model.mk_pickle_dict(), f)
 
+        record_path = self.model_dir / f"epoch-{epoch}.record.json"
+        with open(record_path, "w") as f:
+            json.dump({ "examples": examples, "validation": validation}, f, indent=1)
 
-
-def fit(model_path : str, 
+def fit(model_dir : str, 
         corpus_path : str, 
         import_graph_path : str,
         embeds_path : str,
@@ -597,6 +629,7 @@ def fit(model_path : str,
     project="premise-selection-code-embeddings-pretrained",
     # Track hyperparameters and run metadata
     config={
+        "model_dir": model_dir,
         "corpus_path": corpus_path,
         "import_graph_path":import_graph_path,
         "embeds_path": embeds_path,
@@ -607,7 +640,7 @@ def fit(model_path : str,
 
 
     corpus  = Corpus(corpus_path, import_graph_path)
-    logger.debug(f"loading embeds '{model_path}'...")
+    logger.debug(f"loading embeds '{embeds_path}'...")
     with gzip.open(embeds_path, "rb") as f:
         loaded = pickle.load(f)
         embeds = loaded["embeds"]
@@ -635,16 +668,18 @@ def fit(model_path : str,
                                                      num_in_file_negatives=0,
                                                     embedded_strings=embedded_strings))
     logger.info(f"training model...")
-    model.on_epoch_end_callbacks.append(ModelSaver(model_path))
+    os.makedirs(model_dir, exist_ok=True)
+    model.on_epoch_end_callbacks.append(ModelSaver(model_dir))
     model.train()
-    os.makedirs(pathlib.Path(model_path).parent, exist_ok=True)
 
+
+    model_path = pathlib.path(model_dir) / "final.pickle.gz"
     logger.info(f"writing model to {model_path}")
     with gzip.open(model_path, "wb") as f:
         pickle.dump(model.mk_pickle_dict(), f)
 
 
-def test(model_path : str, 
+def test(test_model_path : str, 
         corpus_path : str, 
         import_graph_path : str,
         embeds_path : str,
@@ -653,13 +688,15 @@ def test(model_path : str,
         microbatch_size : int,
         nepoch : int):
     corpus  = Corpus(corpus_path, import_graph_path)
-    logger.debug(f"loading embeds '{model_path}'...")
+    logger.debug(f"loading embeds '{embeds_path}'...")
     with gzip.open(embeds_path, "rb") as f:
         loaded = pickle.load(f)
         embeds = loaded["embeds"]
-    logger.info(f"load embeds. {len(list(embeds.keys()))}")
+    assert embeds is not None
+    embedded_strings = list(embeds.keys())
+    logger.info(f"load embeds. {len(embedded_strings)}")
 
-    logger.info(f"starting model training from path '{data_dir}'")
+    logger.info(f"starting model testing from path '{data_dir}'")
     assert embeds is not None
     model = MyModel(corpus=corpus,
                   embeddings=embeds,
@@ -678,14 +715,15 @@ def test(model_path : str,
                                                      num_negatives=0,
                                                      num_in_file_negatives=0,
                                                     embedded_strings=embedded_strings))
-    logger.info(f"loading model from {model_path}...")
-    with gzip.open(model_path, "rb") as f:
+    logger.info(f"loading model weights from {test_model_path}...")
+    with gzip.open(test_model_path, "rb") as f:
         model.load_pickle_dict(pickle.load(f))
     logger.info(f"loaded model.")
+    logger.info(f"testing model...")
     model.test()
 
 
-def debug_missing_key(model_path : str, 
+def debug_missing_key(
         corpus_path : str, 
         import_graph_path : str,
         embeds_path : str,
@@ -694,7 +732,7 @@ def debug_missing_key(model_path : str,
         microbatch_size : int,
         nepoch : int):
     corpus  = Corpus(corpus_path, import_graph_path)
-    logger.debug(f"loading embeds '{model_path}'...")
+     #logger.debug(f"loading embeds '{embeds_path}'...")
 
 
     strings = set()

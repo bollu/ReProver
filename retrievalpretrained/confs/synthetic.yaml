@@ -3,8 +3,8 @@ common:
   corpus_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/dataset_synthetic_count=100/corpus.json
   import_graph_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/dataset_synthetic_count=100/file_import_graph.json
   data_dir: ../llm_benchmarking/fstar_insights/lemmas_with_premises/dataset_synthetic_count=100/
-  embeds_path: ./retrievalpretrained/models/embeds_synthetic.pickle.gz
-  model_path: ./retrievalpretrained/models/model_synthetic_nepoch=1.pickle.gz
+  embeds_path: ./retrievalpretrained/embeds/embeds_synthetic.pickle.gz
+  model_dir: ./retrievalpretrained/models/synthetic/
   nepoch: 1000
   minibatch_size: 10
   microbatch_size: 10

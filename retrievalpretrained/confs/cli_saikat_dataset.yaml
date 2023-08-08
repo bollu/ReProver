@@ -2,11 +2,13 @@ common:
   corpus_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/corpus_everest.json
   import_graph_path: ../llm_benchmarking/fstar_insights/lemmas_with_premises/file_import_graph_everest.json
   data_dir: ../llm_benchmarking/fstar_insights/lemmas_with_premises/saikat_dataset_filtered_premises/initial_data/
-  embeds_path: ./retrievalpretrained/models/embeds_everest_saikat_filtered_premises.pickle.gz
-  model_path: ./retrievalpretrained/models/model_everest_saikat_filtered_premises.pickle.gz
-  nepoch: 10
-  minibatch_size: 64
-  microbatch_size: 10
+  embeds_path: ./retrievalpretrained/embeds/embeds_everest_saikat_filtered_premises.pickle.gz
+  model_dir: ./retrievalpretrained/models/model_everest_saikat_filtered_premises/
+  # test_model_path: ./retrievalpretrained/models/model_everest_saikat_filtered_premises.pickle.best.gz
+  test_model_path: ./retrievalpretrained/models/model_everest_saikat_filtered_premises.pickle.epoch999.gz
+  nepoch: 1000
+  minibatch_size: 128
+  microbatch_size: 64
   eval_batch_size: 128
 
 download: {}
