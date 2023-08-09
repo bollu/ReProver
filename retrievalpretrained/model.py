@@ -100,6 +100,7 @@ class PretrainedDataset(Dataset):
     embedded_strings : List[str] # names for which we have embeddings
     num_negatives : int
     is_train : bool
+    data : List[Dict[str, Any]]
     def __init__(
         self,
         data_paths: List[str],
@@ -310,8 +311,17 @@ class MyModel:
         self.validate_dataset = validate_dataset
         self.minibatch_size = minibatch_size
         self.microbatch_size = microbatch_size
-        self.ctx_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN)
-        self.premise_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN)
+        OUR_EMBEDDING_VEC_LEN = OPENAI_EMBEDDING_VEC_LEN
+        # self.ctx_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OUR_EMBEDDING_VEC_LEN)
+        # self.premise_projection = MLP(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN, OUR_EMBEDDING_VEC_LEN)
+
+        # identity operators:
+        self.ctx_projection = torch.nn.Linear(OPENAI_EMBEDDING_VEC_LEN, OPENAI_EMBEDDING_VEC_LEN)
+        self.premise_projection = self.ctx_projection
+        # self.ctx_projection = torch.nn.Identity()
+        # self.premise_projection = torch.nn.Identity()
+
+
         self.on_epoch_end_callbacks = []
         self.optimizer = None
         self.lrscheduler = None
@@ -358,25 +368,38 @@ class MyModel:
         for (ic, c) in enumerate(ctx_names):
             labels.append([])
             for (ip, p) in enumerate(premise_names):
-                labels[ic].append(float(p in data[ic]["all_pos_premise_names"]))
+                is_positive =  p in data[ic]["all_pos_premise_names"]
+                labels[ic].append(float(is_positive))
             labels[ic] = torch.tensor(labels[ic]).reshape(1, -1)
 
         ctxs = torch.cat(ctxs, axis=0).to(device)
         premises = torch.cat(premises, axis=0).to(device)
+        # [NCTX x NPREMISE]
         labels = torch.cat(labels, axis=0).to(device)
 
         logger.info(f"ctxs: {ctxs.shape} | premises: {premises.shape} | labels: {labels.shape}")
+        logger.info(f"labels: {labels.shape}")
+        print(labels)
         # | ctx_embed: {ctx_embed.shape} | premise_embed: {premise_embed.shape} | dots: {dots.shape}")
 
         # [NCTX x DEMBED]
         ctx_embed = self.ctx_projection(ctxs)
+        # dim = 1 means that we take all of 'dim=1' and normalize, fixing all other indexes.
+        ctx_embed = torch.nn.functional.normalize(ctx_embed, dim=1)
         # [NPREMSE x DEMBED]
         premise_embed = self.premise_projection(premises)
+        premise_embed = torch.nn.functional.normalize(premise_embed, dim=1)
         logger.info(f"ctxs_embed {ctx_embed.shape} | premise_embed: {premise_embed.shape}")
         # [NCTX x NPREMISE]
         dots = ctx_embed @ premise_embed.T
+        logger.info(f"dots: {dots.shape}")
+        logger.info(dots)
+
+        assert torch.all(torch.le(dots, torch.Tensor([1.1]).to(device)))
+        assert torch.all(torch.ge(dots, torch.Tensor([-1.1]).to(device)))
         logger.info(f"dots: {dots.shape} | labels: {labels.shape}")
-        loss = torch.nn.functional.mse_loss(dots, labels)
+        assert dots.shape == labels.shape
+        loss = torch.sum(torch.nn.functional.mse_loss(dots, labels))
         return loss
 
     def train_minibatch(self, records: List[Dict[str, Any]]) -> float:
@@ -398,14 +421,17 @@ class MyModel:
             wandb.log({"batch_loss": batch_loss})
             epoch_loss += batch_loss
             logger.info(f"epoch[0-1] {iepoch/self.nepoch:4.2f}, batch[0-1] {i/len(records):4.2f}, batch loss: {batch_loss:5.3f}, epoch_loss: {epoch_loss:5.3f}")
-            self.lrscheduler.step(iepoch + i / len(records))
+            # self.lrscheduler.step(iepoch + i / len(records))
+            self.lrscheduler.step()
         # logger.info(f"epoch loss: {loss.item()}")
         return epoch_loss
 
     def train(self):
         # self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-2)
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        self.lrscheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0 = 1, T_mult=2)
+        self.optimizer = torch.optim.Adagrad(self.parameters(), lr=1e-3)
+        # self.lrscheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0 = 1, T_mult=2)
+        # self.lrscheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=0.9)
+        self.lrscheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=1)
         for e in range(self.nepoch):
             logger.info(f"..epoch: {e}/{self.nepoch}")
             epoch_loss = self.train_epoch(e, self.train_dataset)
@@ -432,21 +458,30 @@ class MyModel:
         all_premises_embeds = torch.cat([self.embeddings[ix2premise[ix]].view(1, -1) for ix in range(len(ix2premise)) ], axis=0).to(device)
         # NBATCH x OUR_EMBED_DIM
         all_premises_embeds = self.premise_projection(all_premises_embeds)
+        all_premises_embeds = torch.nn.functional.normalize(all_premises_embeds, dim=1)
         logger.info("all_premises_embeds: {all_premises_embeds}")
         # premises indexed by ix.
         examples = []
 
+        seen_contexts = set()
         for record in tqdm(self.validate_dataset, desc=f"evaluation on {self.validate_dataset}"):
+            if record["context_name"] in seen_contexts: continue # skip repeated contexts.
             # 1 x OPENAI_EMBED_DIM
             ctx_embed = self.embeddings[self.corpus.get_ctx_embed_str_for_name(record["context_name"])].to(device)
             # 1 x OUR_EMBED_DIM
             ctx_embed = self.ctx_projection(ctx_embed)
+            ctx_embed = torch.nn.functional.normalize(ctx_embed, dim=0) # has only a single dimension.
             # OUR_EMBED_DIM
             ctx_embed = ctx_embed.view(-1)
             # OUR_EMBED_DIM x [NBATCH x OUR_EMBED_DIM].T
             # OUR_EMBED_DIM x [OUR_EMBED_DIM; NBATCH]
-            # NBATCH
-            similarities = self.embeddings[self.corpus.get_ctx_embed_str_for_name(record["context_name"])] @ all_premises_embeds.T
+            similarities = ctx_embed @ all_premises_embeds.T
+
+            logger.info(f"similarities: {similarities.shape}")
+            logger.info(similarities)
+            assert torch.all(torch.le(similarities, torch.Tensor([1.]).to(device)))
+            assert torch.all(torch.ge(similarities, torch.Tensor([-1.]).to(device)))
+
             ix2rank = similarities.argsort(dim=0, descending=True).tolist()
             all_pos_premise_names = record["all_pos_premise_names"]
             all_pos_premise_names_set = set(all_pos_premise_names)
@@ -679,7 +714,7 @@ def fit(model_dir : str,
                   train_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
                                                   corpus=corpus,
                                                   is_train=True,
-                                                  num_negatives=2, num_in_file_negatives=1,
+                                                  num_negatives=1, num_in_file_negatives=1,
                                                   embedded_strings=embedded_strings),
                   validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
                                                      corpus=corpus,
