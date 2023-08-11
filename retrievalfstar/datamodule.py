@@ -71,7 +71,7 @@ class Corpus:
         for record in corpus:
             for premise in record["premises"]:
                 if premise not in name2corpusix: 
-                    logger.warning(f"premise '{premise}' not in corpus. skipping...")
+                    # logger.warning(f"premise '{premise}' not in corpus. skipping...")
                     skipped_premises.add(premise)
                     continue
                 kept_premises.add(premise)
@@ -96,7 +96,7 @@ class Corpus:
         for (ix, record) in enumerate(corpus):
             name = record["name"]
             if name in name2ix:
-                logger.warning(f"found double definition of records with name {name}. skipping duplicate...")
+                # logger.warning(f"found double definition of records with name {name}. skipping duplicate...")
                 assert record == corpus[name2ix[name]]
                 # logger.error(f"new record: {record}")
                 # logger.error(f"old record: {corpus[name2ix[name]]}")
@@ -234,7 +234,7 @@ class RetrievalDataset(Dataset):
                 print(f"loading datum with keys '{datum.keys()}'")
             print(f"loading '{i}'th data from '{data_path}'. keys: '{datum.keys()}'")
             if not self.corpus.has_definition_for_name(datum["name"]):
-                logger.warning(f"skipping defn '{datum['name']}' as we do not have definition")
+                # logger.warning(f"skipping defn '{datum['name']}' as we do not have definition")
                 continue
             # TODO: refactor this to be way flatter.
             # context = Context(name=datum["name"],
@@ -312,7 +312,7 @@ class RetrievalDataset(Dataset):
 	
         if not premises_outside_file:
                premises_outside_file = self.corpus.all_premise_names # HACK: just store all premise names
-               logger.error(f"unable to find premise outside file '{cur_file_name}'!")
+               #logger.error(f"unable to find premise outside file '{cur_file_name}'!")
             
         ex["neg_premise_names"] = random.sample(premises_outside_file, self.num_negatives)
         return ex

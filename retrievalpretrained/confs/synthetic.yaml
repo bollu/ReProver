@@ -5,9 +5,10 @@ common:
   data_dir: ../llm_benchmarking/fstar_insights/lemmas_with_premises/dataset_synthetic_count=100/
   embeds_path: ./retrievalpretrained/embeds/embeds_synthetic.pickle.gz
   model_dir: ./retrievalpretrained/models/synthetic/
+  test_model_path: ./retrievalpretrained/models/synthetic/best.pickle.gz
   nepoch: 1000
-  minibatch_size: 10
-  microbatch_size: 10
+  minibatch_size: 2
+  microbatch_size: 2
   eval_batch_size: 128
 
 download: {}
