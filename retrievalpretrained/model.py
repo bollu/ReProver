@@ -779,6 +779,53 @@ def test(test_model_path : str,
     model.test()
 
 
+
+def sine_qua_non(test_model_path : str, 
+        corpus_path : str, 
+        import_graph_path : str,
+        embeds_path : str,
+        data_dir : str,
+        minibatch_size : int, 
+        microbatch_size : int,
+        nepoch : int):
+
+    raise RuntimeError("sine qua non error")
+    corpus  = Corpus(corpus_path, import_graph_path)
+    logger.debug(f"loading embeds '{embeds_path}'...")
+    with gzip.open(embeds_path, "rb") as f:
+        loaded = pickle.load(f)
+        embeds = loaded["embeds"]
+    assert embeds is not None
+    embedded_strings = list(embeds.keys())
+    logger.info(f"load embeds. {len(embedded_strings)}")
+
+    logger.info(f"starting model testing from path '{data_dir}'")
+    assert embeds is not None
+    model = MyModel(corpus=corpus,
+                  embeddings=embeds,
+                  minibatch_size=minibatch_size,
+                  microbatch_size=microbatch_size,
+                  nepoch=nepoch,
+                  embedded_strings=embedded_strings,
+                  train_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
+                                                  corpus=corpus,
+                                                  is_train=True,
+                                                  num_negatives=2, num_in_file_negatives=1,
+                                                  embedded_strings=embedded_strings),
+                  validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
+                                                     corpus=corpus,
+                                                     is_train=False,
+                                                     num_negatives=0,
+                                                     num_in_file_negatives=0,
+                                                    embedded_strings=embedded_strings))
+    logger.info(f"loading model weights from {test_model_path}...")
+    with gzip.open(test_model_path, "rb") as f:
+        model.load_pickle_dict(pickle.load(f))
+    logger.info(f"loaded model.")
+    logger.info(f"testing model...")
+    model.test()
+
+
 def debug_missing_key(
         corpus_path : str, 
         import_graph_path : str,
@@ -851,6 +898,7 @@ def debug_missing_key(
                 # diff = difflib.context_diff(known_name, missing_name)
                 # print(''.join(diff), end="")
 
+
 def call_fn_with_dict(f : Callable, d : Dict[str, Any]):
     sig = inspect.signature(f)
     calldict = dict()
@@ -861,6 +909,7 @@ def call_fn_with_dict(f : Callable, d : Dict[str, Any]):
         calldict[p] = d[p]
     logger.info(f"invoking function {f} with args {calldict}")
     return f(**calldict)
+
 
 def toplevel(args):
     opts_all = yaml.safe_load(args.config)
@@ -878,6 +927,9 @@ def toplevel(args):
         opts_test = opts_all["test"]
         opts = {**opts_common, **opts_test}
         call_fn_with_dict(test, opts)
+    elif args.command =="sine":
+        opts = opts_commont
+        call_fn_with_dict(sine_qua_non, opts)
     elif args.command =="debug_missing_key":
         call_fn_with_dict(debug_missing_key, opts_common)
     else:
@@ -902,6 +954,9 @@ def main():
     # run cosine similarity.
     test = subparsers.add_parser('test')
     test.set_defaults(command="test")
+
+    sine = subparsers.add_parser('sine')
+    sine.set_defaults(command="sine")
 
     # run cosine similarity.
     test = subparsers.add_parser('debug_missing_key')

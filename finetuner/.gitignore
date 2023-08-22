@@ -1,0 +1,8 @@
+model-finetuned-definition-prediction
+input.txt
+dataset
+output_dir
+runs
+raw_dataset
+wandb
+
