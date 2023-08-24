@@ -2,7 +2,9 @@
 from typing import *
 
 class SineQuaNon:
-    def __init__(self, axioms : List[str], symbols : List[str]):
+    def __init__(self, axioms : Dict[str, str], symbols : List[str]):
+        assert isinstance(axioms, dict)
+        assert isinstance(symbols, list)
         self.symbols = symbols
         self.generality_threshold = 1
         self.axioms = axioms
@@ -19,6 +21,30 @@ class SineQuaNon:
         # sym2numocc and axiom2syms to efficiently search for
         # whether the axiom is triggered by a symbol
         # self._sym2triggered = self.build_sym2triggered()
+
+
+    def goal2selection(self, goal : str) -> List[str]:
+        frontier = [] # symbols to be visited.
+        for sym in self.symbols:
+            if self.occurs_in_goal(sym=sym, goal=goal):
+                frontier.append(sym)
+
+        out = []
+        seen = set()
+        it = 0
+        while len(frontier):
+            it += 1
+            print(f"goal2selection '{goal}'\n\tit:'{it}'")
+            new_frontier = []
+            for sym in frontier:
+                if sym in seen: continue
+                seen.add(sym)
+                for ax in self.sym2triggered(sym):
+                    out.append(ax)
+                    new_frontier.extend(self.axiom2triggers(ax))
+            frontier = new_frontier
+        return out
+
 
     def is_triggered(self, sym : str, axiom : str):
         """
@@ -45,10 +71,10 @@ class SineQuaNon:
             return self._sym2triggered[sym]
 
         out = []
-        for axiom in self.axioms:
-            if self.is_triggered(sym=sym, axiom=axiom):
-                out.append(axiom)
-        self.sym2triggered[sym] = out
+        for axiom_name in self.axioms:
+            if self.is_triggered(sym=sym, axiom=self.axioms[axiom_name]):
+                out.append(axiom_name)
+        self._sym2triggered[sym] = out
         return out
 
     def axiom2syms(self, axiom: str):
@@ -61,10 +87,16 @@ class SineQuaNon:
         self._axiom2syms[axiom] = out
         return out
 
+    def axiom2triggers(self, axiom : str):
+        syms = self.axiom2syms(axiom)
+        min_occ = min([self.sym2numoccs(sym) for sym in syms])
+        out = [sym for sym in syms if self.sym2numoccs(sym) == min_occ]
+        return out
+
     def sym2numoccs(self, sym : str) -> int:
         if sym in self._sym2numoccs:
             return self._sym2numoccs[sym]
-        out = sum([self.occurs_in_goal(sym, ax) for ax in axioms])
+        out = sum([self.occurs_in_goal(sym, ax) for ax in self.axioms])
         self._sym2numoccs[sym] = out
         return out
 
@@ -83,6 +115,7 @@ if __name__ == "__main__":
         "subclass(guiness, beer)",
         "subclass(pilsner, beer)",
     ]
+    axioms = dict(list(zip(["name:" + ax[:20] + "..." for ax in axioms], axioms)))
     symbols = [
         "subclass",
         "liquid",
@@ -99,10 +132,22 @@ if __name__ == "__main__":
     print(f"{'symbol':10} | {'occ'}")
     for symbol in symbols:
         print(f"{symbol:10} | {sqn.sym2numoccs(symbol):5}")
+    print(f"{'='*80}")
 
     for axiom in axioms:
         triggers = []
         for sym in symbols:
             if sqn.is_triggered(sym=sym, axiom=axiom):
                 triggers.append(sym)
-        print(f"{axiom:20} | {' '.join(triggers):20}")
+        print(f"{axiom:50} | {' '.join(triggers):20}")
+
+    print(f"{'='*80}")
+    print(f"{'SYMBOL':50} | {'TRIGGERED AXIOMS'}")
+    for sym in symbols:
+        triggered = sqn.sym2triggered(sym)
+        print(f"{sym:50} | {' '.join(triggered):20}")
+
+    print(f"{'='*80}")
+    print(f"{'GOAL':50} | {'USEFUL PREMISES'}")
+    for axiom_name in axioms:
+        print(f"{axioms[axiom_name]:50} | {' '.join(sqn.goal2selection(axioms[axiom_name]))}")

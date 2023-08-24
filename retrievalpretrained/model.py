@@ -30,6 +30,7 @@ from retrievalfstar.datamodule import Corpus
 from torch.utils.data import Dataset, DataLoader
 import wandb
 import pretty_errors
+from retrievalpretrained.sinequanon import SineQuaNon
 
 # embedding model parameters
 embedding_model = "text-embedding-ada-002"
@@ -781,6 +782,7 @@ def test(test_model_path : str,
 
 
 def sine_qua_non(test_model_path : str, 
+        model_dir : str,
         corpus_path : str, 
         import_graph_path : str,
         embeds_path : str,
@@ -789,7 +791,6 @@ def sine_qua_non(test_model_path : str,
         microbatch_size : int,
         nepoch : int):
 
-    raise RuntimeError("sine qua non error")
     corpus  = Corpus(corpus_path, import_graph_path)
     logger.debug(f"loading embeds '{embeds_path}'...")
     with gzip.open(embeds_path, "rb") as f:
@@ -801,31 +802,119 @@ def sine_qua_non(test_model_path : str,
 
     logger.info(f"starting model testing from path '{data_dir}'")
     assert embeds is not None
-    model = MyModel(corpus=corpus,
-                  embeddings=embeds,
-                  minibatch_size=minibatch_size,
-                  microbatch_size=microbatch_size,
-                  nepoch=nepoch,
-                  embedded_strings=embedded_strings,
-                  train_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "train.json"],
-                                                  corpus=corpus,
-                                                  is_train=True,
-                                                  num_negatives=2, num_in_file_negatives=1,
-                                                  embedded_strings=embedded_strings),
-                  validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
+
+    validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
                                                      corpus=corpus,
                                                      is_train=False,
                                                      num_negatives=0,
                                                      num_in_file_negatives=0,
-                                                    embedded_strings=embedded_strings))
-    logger.info(f"loading model weights from {test_model_path}...")
-    with gzip.open(test_model_path, "rb") as f:
-        model.load_pickle_dict(pickle.load(f))
-    logger.info(f"loaded model.")
-    logger.info(f"testing model...")
-    model.test()
+                                                    embedded_strings=embedded_strings)
 
 
+    # TODO: don't throw away stuff, just truncate.
+    # version of model.test() that implements sine selection
+    ix2premise_name = [name for name in corpus.all_premise_names \
+                       if corpus.get_premise_embed_str_for_name(name) in embedded_strings]
+    ix2premise = [corpus.get_premise_embed_str_for_name(name) for name in ix2premise_name]
+
+    # what are the precise rules here? What do we choose to be the axioms? I guess the full premise DB
+    sqn = SineQuaNon(symbols=ix2premise_name, axioms=dict(zip(ix2premise_name, ix2premise)))
+    premise2ix = { ix2premise[ix] : ix for ix in range(len(ix2premise)) }
+
+    seen_contexts = set()
+    collator = TestStatisticsCollator()
+    examples = []
+    for record in tqdm(validate_dataset, desc=f"evaluation on {validate_dataset}"):
+        if record["context_name"] in seen_contexts: continue # skip repeated contexts.
+        rank2name = sqn.goal2selection(corpus.get_ctx_embed_str_for_name(record["context_name"]))
+        retreived_premise_names = rank2name
+        all_pos_premise_names = record["all_pos_premise_names"]
+        all_pos_premise_names_set = set(all_pos_premise_names)
+        # TODO: filter by accessible premises.
+        TP1 = retreived_premise_names[0] in all_pos_premise_names
+        R1 = float(TP1) / 1
+        collator.R1s.append(R1)
+        TP10 = len(all_pos_premise_names_set.intersection(retreived_premise_names[:10]))
+        R10 = float(TP10) / len(all_pos_premise_names[:10])
+        collator.R10s.append(R10)
+
+        RR = 0
+        for j, p in enumerate(retreived_premise_names):
+            if p in all_pos_premise_names:
+                RR = (1.0 / (j + 1))
+                break
+        collator.RRs.append(RR)
+
+        # AP = integral_0^1 P(r) dr
+        # change of variables into k 
+        # let rel(k) = 1 if retreived_premises[k] in all_pos_premises else 0
+        # let s(k) = sum_{j=0}^k rel(j)
+        # p(k) = s(k) / k
+        # r = s(k) / |all_pos_premises|
+        # dk = 1
+        # dr = (r(k + dk) -  r(k)) / dk 
+        #    = (r(k + 1) - r(k)) / 1
+        #    = rel(k+1) / |all_pos_premises|
+        # AP = integral_0^1 P(r) dr
+        #    = sum_0^N P(r(k)) dr(k)
+        #    = sum_0^N p(k) rel(k) / |all_pos_premises|
+        AP = 0
+        DCG = 0
+        IDCG = 0
+        
+        K_at_full_recall = np.nan # How to correctly initialize?
+        K_percent_at_full_recall = np.nan
+        ncorrect_at_j = 0
+
+        for j, p in enumerate(retreived_premise_names):
+            discount = np.log2(j + 1) if j > 0 else 1
+            if j < len(all_pos_premise_names):
+                IDCG += 1.0 / discount      
+
+            rel_at_j = int(p in all_pos_premise_names)
+            if rel_at_j:
+                print(f'ctx: {record["context_name"]:20s} relevant premise: {p:20s}@{j:4d}')
+            ncorrect_at_j += rel_at_j
+
+            if ncorrect_at_j == len(all_pos_premise_names):
+                K_at_full_recall = j + 1
+                K_percent_at_full_recall = K_at_full_recall / len(retreived_premise_names)
+
+            DCG += rel_at_j / discount
+            p_at_j = ncorrect_at_j / (j + 1)
+            AP += p_at_j * rel_at_j
+        print(f'AP for {record["context_name"]:20s}: {AP:6f} | #pospremises: {all_pos_premise_names}')
+        collator.APs.append(AP)
+        NDCG = DCG / IDCG
+        collator.NDCGs.append(NDCG)
+        collator.Ks_at_full_recall.append(K_at_full_recall)
+        collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
+
+        examples.append({
+            "context_name": record["context_name"],
+            "all_pos_premise_names": record["all_pos_premise_names"],
+            "retreived_premise_names": retreived_premise_names[:30], # only keep 30, otherwise this gets too large.
+            "TP1" : TP1,
+            "TP10": TP10,
+            "R10" : R10,
+            "R1" : R1,
+            "NDCG": NDCG,
+            "RR" : RR,
+            "AP": AP
+        })
+
+    # finish processing all records.
+    # average NDCG
+    R1 = np.mean(collator.R1s)
+    R10 = np.mean(collator.R10s)
+    MAP = np.mean(collator.APs)
+    NDCG = np.mean(collator.NDCGs)
+    RR = np.mean(collator.RRs)
+    logger.info(f"** Eval on {validate_dataset} | R1[0-1]: {R1} , RR[0-1]: {RR}, R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
+
+    record_path = pathlib.Path(model_dir) / "sine_qua_non.record.json"
+    with open(record_path, "w") as f:
+        json.dump({ "examples": examples }, f, indent=1)
 def debug_missing_key(
         corpus_path : str, 
         import_graph_path : str,
@@ -927,13 +1016,13 @@ def toplevel(args):
         opts_test = opts_all["test"]
         opts = {**opts_common, **opts_test}
         call_fn_with_dict(test, opts)
-    elif args.command =="sine":
-        opts = opts_commont
+    elif args.command =="sinequanon":
+        opts = opts_common
         call_fn_with_dict(sine_qua_non, opts)
     elif args.command =="debug_missing_key":
         call_fn_with_dict(debug_missing_key, opts_common)
     else:
-        logger.error(f"ERROR: expected one of 'download' or 'test' commands, found: '{args.command}'")
+        logger.error(f"ERROR: expected one of 'download', 'fit', 'test', 'sinequanon' found: '{args.command}'")
         sys.exit(1)
 
 def main():
@@ -955,12 +1044,12 @@ def main():
     test = subparsers.add_parser('test')
     test.set_defaults(command="test")
 
-    sine = subparsers.add_parser('sine')
-    sine.set_defaults(command="sine")
+    sine = subparsers.add_parser('sinequanon')
+    sine.set_defaults(command="sinequanon")
 
     # run cosine similarity.
-    test = subparsers.add_parser('debug_missing_key')
-    test.set_defaults(command="debug_missing_key")
+    debug_missing_key = subparsers.add_parser('debug_missing_key')
+    debug_missing_key.set_defaults(command="debug_missing_key")
 
     args = parser.parse_args()
     toplevel(args)
