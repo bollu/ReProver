@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from typing import *
+from tqdm import tqdm
 
 class SineQuaNon:
     def __init__(self, axioms : Dict[str, str], symbols : List[str]):
@@ -23,27 +24,29 @@ class SineQuaNon:
         # self._sym2triggered = self.build_sym2triggered()
 
 
-    def goal2selection(self, goal : str) -> List[str]:
-        frontier = [] # symbols to be visited.
+    def goal2selection(self, goal : str) -> List[List[str]]:
+        print(f"goal2selection '{goal}'")
+        frontier = set() # symbols to be visited.
         for sym in self.symbols:
             if self.occurs_in_goal(sym=sym, goal=goal):
-                frontier.append(sym)
+                frontier.add(sym)
 
-        out = []
         seen = set()
         it = 0
         while len(frontier):
+            axioms_per_level = []
             it += 1
-            print(f"goal2selection '{goal}'\n\tit:'{it}'")
-            new_frontier = []
-            for sym in frontier:
+            print(f"    iteration:'{it}' | trigger symbols: {str(frontier)}")
+            new_frontier = set()
+            for sym in tqdm(frontier, desc="    iterating on frontier..."):
                 if sym in seen: continue
                 seen.add(sym)
                 for ax in self.sym2triggered(sym):
-                    out.append(ax)
-                    new_frontier.extend(self.axiom2triggers(ax))
+                    axioms_per_level.append(ax)
+                    new_frontier = new_frontier.union(self.axiom2triggers(ax))
+            print(f"    iteration:'{it}' | triggered axioms (#axioms={len(axioms_per_level)}): {str(axioms_per_level[:3])}")
             frontier = new_frontier
-        return out
+            yield axioms_per_level
 
 
     def is_triggered(self, sym : str, axiom : str):
@@ -150,4 +153,12 @@ if __name__ == "__main__":
     print(f"{'='*80}")
     print(f"{'GOAL':50} | {'USEFUL PREMISES'}")
     for axiom_name in axioms:
-        print(f"{axioms[axiom_name]:50} | {' '.join(sqn.goal2selection(axioms[axiom_name]))}")
+        print(f"{axioms[axiom_name]:50}")
+        for (i, lvl) in enumerate(sqn.goal2selection(axioms[axiom_name])):
+            print(f"    {i:4} | {str(lvl)}")
+
+    print("="*80)
+    GOAL2SELECTION_QUERY = "petrol => guiness"
+    print(f"goal2selection({GOAL2SELECTION_QUERY})")
+    for (i, lvl) in enumerate(sqn.goal2selection(GOAL2SELECTION_QUERY)):
+        print(f"{i:4} | {str(lvl)}")

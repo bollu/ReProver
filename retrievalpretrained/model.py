@@ -826,7 +826,12 @@ def sine_qua_non(test_model_path : str,
     examples = []
     for record in tqdm(validate_dataset, desc=f"evaluation on {validate_dataset}"):
         if record["context_name"] in seen_contexts: continue # skip repeated contexts.
-        rank2name = sqn.goal2selection(corpus.get_ctx_embed_str_for_name(record["context_name"]))
+        level2names = []
+        rank2name = []
+        for lvl in sqn.goal2selection(corpus.get_ctx_embed_str_for_name(record["context_name"])):
+            level2names.append(lvl)
+            rank2name.extend(lvl)
+            if len(rank2name) > 1000: break # give up after 1000 entries
         retreived_premise_names = rank2name
         all_pos_premise_names = record["all_pos_premise_names"]
         all_pos_premise_names_set = set(all_pos_premise_names)
@@ -893,7 +898,7 @@ def sine_qua_non(test_model_path : str,
         examples.append({
             "context_name": record["context_name"],
             "all_pos_premise_names": record["all_pos_premise_names"],
-            "retreived_premise_names": retreived_premise_names[:30], # only keep 30, otherwise this gets too large.
+            "retreived_premise_names": [{ "num_entries": len(lvl), "entries": lvl[:10] } for lvl in level2names[:4]], # only keep 10 per level.
             "TP1" : TP1,
             "TP10": TP10,
             "R10" : R10,
