@@ -45,7 +45,7 @@ class MePo:
             for name in axiom_name_db:
                 axiom = self.axioms[name]
                 axiom_syms = set(self.axiom2syms(axiom))
-                print("name: %30s | syms: %30s" % (name, axiom_syms)) 
+                # print("name: %30s | syms: %30s" % (name, axiom_syms)) 
                 mark = len(relevant_symbols.intersection(axiom_syms)) / len(axiom_syms)
                 if mark >= P:
                     relevant_names.add(name)

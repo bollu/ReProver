@@ -941,7 +941,7 @@ def sine_qua_non(test_model_path : str,
 
 
 
-def me_po(test_model_path : str, 
+def mepo(test_model_path : str, 
         model_dir : str,
         corpus_path : str, 
         import_graph_path : str,
@@ -1076,7 +1076,7 @@ def me_po(test_model_path : str,
     RR = np.mean(collator.RRs)
     logger.info(f"** Eval on {validate_dataset} | R1[0-1]: {R1} , RR[0-1]: {RR}, R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
 
-    record_path = pathlib.Path(model_dir) / "me_po.record.json"
+    record_path = pathlib.Path(model_dir) / "mepo.record.json"
     with open(record_path, "w") as f:
         json.dump({ "examples": examples }, f, indent=1)
 
@@ -1186,7 +1186,7 @@ def toplevel(args):
         call_fn_with_dict(sine_qua_non, opts)
     elif args.command =="mepo":
         opts = opts_common
-        call_fn_with_dict(me_po, opts)
+        call_fn_with_dict(mepo, opts)
     elif args.command =="debug_missing_key":
         call_fn_with_dict(debug_missing_key, opts_common)
     else:
@@ -1214,6 +1214,9 @@ def main():
 
     sine = subparsers.add_parser('sinequanon')
     sine.set_defaults(command="sinequanon")
+
+    mepo = subparsers.add_parser('mepo')
+    mepo.set_defaults(command="mepo")
 
     # run cosine similarity.
     debug_missing_key = subparsers.add_parser('debug_missing_key')
