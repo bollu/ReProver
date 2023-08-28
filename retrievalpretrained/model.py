@@ -31,6 +31,7 @@ from torch.utils.data import Dataset, DataLoader
 import wandb
 import pretty_errors
 from retrievalpretrained.sinequanon import SineQuaNon
+from retrievalpretrained.mepo import MePo
 
 # embedding model parameters
 embedding_model = "text-embedding-ada-002"
@@ -826,12 +827,26 @@ def sine_qua_non(test_model_path : str,
     examples = []
     for record in tqdm(validate_dataset, desc=f"evaluation on {validate_dataset}"):
         if record["context_name"] in seen_contexts: continue # skip repeated contexts.
+        full_recall_at_lvl = 0
+        cumulative_num_recalled = 0
+        cumulative_seen_premises = set()
         level2names = []
         rank2name = []
+        level2recall = []
+        level2cumulative_seen = []
         for lvl in sqn.goal2selection(corpus.get_ctx_embed_str_for_name(record["context_name"])):
             level2names.append(lvl)
             rank2name.extend(lvl)
-            if len(rank2name) > 1000: break # give up after 1000 entries
+            for name in lvl:
+                if name in record["all_pos_premise_names"] and name not in cumulative_seen_premises:
+                    cumulative_seen_premises.add(name)
+                    cumulative_num_recalled += 1
+            level2recall.append(cumulative_num_recalled / len(record["all_pos_premise_names"]))
+            level2cumulative_seen.append(cumulative_num_recalled)
+            # stop processing once we have seen everything we care about.
+            if cumulative_num_recalled == len(record["all_pos_premise_names"]):
+                break
+
         retreived_premise_names = rank2name
         all_pos_premise_names = record["all_pos_premise_names"]
         all_pos_premise_names_set = set(all_pos_premise_names)
@@ -896,9 +911,12 @@ def sine_qua_non(test_model_path : str,
         collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
 
         examples.append({
+            "total_num_premises": len(ix2premise),
             "context_name": record["context_name"],
             "all_pos_premise_names": record["all_pos_premise_names"],
             "retreived_premise_names": [{ "num_entries": len(lvl), "entries": lvl[:10] } for lvl in level2names[:4]], # only keep 10 per level.
+            "level2recall": level2recall,
+            "level2cumulative_seen": level2cumulative_seen,
             "TP1" : TP1,
             "TP10": TP10,
             "R10" : R10,
@@ -920,6 +938,148 @@ def sine_qua_non(test_model_path : str,
     record_path = pathlib.Path(model_dir) / "sine_qua_non.record.json"
     with open(record_path, "w") as f:
         json.dump({ "examples": examples }, f, indent=1)
+
+
+
+def me_po(test_model_path : str, 
+        model_dir : str,
+        corpus_path : str, 
+        import_graph_path : str,
+        embeds_path : str,
+        data_dir : str,
+        minibatch_size : int, 
+        microbatch_size : int,
+        nepoch : int):
+    # paper reference: Lightweight relevance filtering for machine-generated resolution problems
+    # ~ MEng and PaulsOn
+    corpus  = Corpus(corpus_path, import_graph_path)
+    logger.debug(f"loading embeds '{embeds_path}'...")
+    with gzip.open(embeds_path, "rb") as f:
+        loaded = pickle.load(f)
+        embeds = loaded["embeds"]
+    assert embeds is not None
+    embedded_strings = list(embeds.keys())
+    logger.info(f"load embeds. {len(embedded_strings)}")
+
+    logger.info(f"starting model testing from path '{data_dir}'")
+    assert embeds is not None
+
+    validate_dataset=PretrainedDataset(data_paths=[pathlib.Path(data_dir) / "validate.json"],
+                                                     corpus=corpus,
+                                                     is_train=False,
+                                                     num_negatives=0,
+                                                     num_in_file_negatives=0,
+                                                    embedded_strings=embedded_strings)
+
+    # TODO: don't throw away stuff, just truncate.
+    # version of model.test() that implements sine selection
+    ix2premise_name = [name for name in corpus.all_premise_names \
+                       if corpus.get_premise_embed_str_for_name(name) in embedded_strings]
+    ix2premise = [corpus.get_premise_embed_str_for_name(name) for name in ix2premise_name]
+
+    # what are the precise rules here? What do we choose to be the axioms? I guess the full premise DB
+    mepo = MePo(symbols=ix2premise_name, axioms=dict(zip(ix2premise_name, ix2premise)))
+    premise2ix = { ix2premise[ix] : ix for ix in range(len(ix2premise)) }
+
+    seen_contexts = set()
+    collator = TestStatisticsCollator()
+    examples = []
+    for record in tqdm(validate_dataset, desc=f"evaluation on {validate_dataset}"):
+        if record["context_name"] in seen_contexts: continue # skip repeated contexts.
+        # this is already sorted in descending order.
+        rank2namescore = mepo.goal2selection(corpus.get_ctx_embed_str_for_name(record["context_name"]))
+        rank2name = [name for (name, score) in rank2namescore]
+
+        retreived_premise_names = rank2name
+        all_pos_premise_names = record["all_pos_premise_names"]
+        all_pos_premise_names_set = set(all_pos_premise_names)
+        # TODO: filter by accessible premises.
+        TP1 = retreived_premise_names[0] in all_pos_premise_names
+        R1 = float(TP1) / 1
+        collator.R1s.append(R1)
+        TP10 = len(all_pos_premise_names_set.intersection(retreived_premise_names[:10]))
+        R10 = float(TP10) / len(all_pos_premise_names[:10])
+        collator.R10s.append(R10)
+
+        RR = 0
+        for j, p in enumerate(retreived_premise_names):
+            if p in all_pos_premise_names:
+                RR = (1.0 / (j + 1))
+                break
+        collator.RRs.append(RR)
+
+        # AP = integral_0^1 P(r) dr
+        # change of variables into k 
+        # let rel(k) = 1 if retreived_premises[k] in all_pos_premises else 0
+        # let s(k) = sum_{j=0}^k rel(j)
+        # p(k) = s(k) / k
+        # r = s(k) / |all_pos_premises|
+        # dk = 1
+        # dr = (r(k + dk) -  r(k)) / dk 
+        #    = (r(k + 1) - r(k)) / 1
+        #    = rel(k+1) / |all_pos_premises|
+        # AP = integral_0^1 P(r) dr
+        #    = sum_0^N P(r(k)) dr(k)
+        #    = sum_0^N p(k) rel(k) / |all_pos_premises|
+        AP = 0
+        DCG = 0
+        IDCG = 0
+        
+        K_at_full_recall = np.nan # How to correctly initialize?
+        K_percent_at_full_recall = np.nan
+        ncorrect_at_j = 0
+
+        for j, p in enumerate(retreived_premise_names):
+            discount = np.log2(j + 1) if j > 0 else 1
+            if j < len(all_pos_premise_names):
+                IDCG += 1.0 / discount      
+
+            rel_at_j = int(p in all_pos_premise_names)
+            if rel_at_j:
+                print(f'ctx: {record["context_name"]:20s} relevant premise: {p:20s}@{j:4d}')
+            ncorrect_at_j += rel_at_j
+
+            if ncorrect_at_j == len(all_pos_premise_names):
+                K_at_full_recall = j + 1
+                K_percent_at_full_recall = K_at_full_recall / len(retreived_premise_names)
+
+            DCG += rel_at_j / discount
+            p_at_j = ncorrect_at_j / (j + 1)
+            AP += p_at_j * rel_at_j
+        print(f'AP for {record["context_name"]:20s}: {AP:6f} | #pospremises: {all_pos_premise_names}')
+        collator.APs.append(AP)
+        NDCG = DCG / IDCG
+        collator.NDCGs.append(NDCG)
+        collator.Ks_at_full_recall.append(K_at_full_recall)
+        collator.Ks_percent_at_full_recall.append(K_percent_at_full_recall)
+
+        examples.append({
+            "total_num_premises": len(ix2premise),
+            "context_name": record["context_name"],
+            "all_pos_premise_names": record["all_pos_premise_names"],
+            "retreived_premise_names": rank2namescore[:20],
+            "TP1" : TP1,
+            "TP10": TP10,
+            "R10" : R10,
+            "R1" : R1,
+            "NDCG": NDCG,
+            "RR" : RR,
+            "AP": AP
+        })
+
+    # finish processing all records.
+    # average NDCG
+    R1 = np.mean(collator.R1s)
+    R10 = np.mean(collator.R10s)
+    MAP = np.mean(collator.APs)
+    NDCG = np.mean(collator.NDCGs)
+    RR = np.mean(collator.RRs)
+    logger.info(f"** Eval on {validate_dataset} | R1[0-1]: {R1} , RR[0-1]: {RR}, R10[0-1]: {R10}, MAP[0-1]: {MAP}, NDCG[0-1]: {NDCG} **")
+
+    record_path = pathlib.Path(model_dir) / "me_po.record.json"
+    with open(record_path, "w") as f:
+        json.dump({ "examples": examples }, f, indent=1)
+
 def debug_missing_key(
         corpus_path : str, 
         import_graph_path : str,
@@ -1024,6 +1184,9 @@ def toplevel(args):
     elif args.command =="sinequanon":
         opts = opts_common
         call_fn_with_dict(sine_qua_non, opts)
+    elif args.command =="mepo":
+        opts = opts_common
+        call_fn_with_dict(me_po, opts)
     elif args.command =="debug_missing_key":
         call_fn_with_dict(debug_missing_key, opts_common)
     else:

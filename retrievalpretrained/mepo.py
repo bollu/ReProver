@@ -4,7 +4,6 @@ from tqdm import tqdm
 
 class MePo:
     def __init__(self, axioms : Dict[str, str], symbols : List[str]):
-        self.c = 2.5
         assert isinstance(axioms, dict)
         assert isinstance(symbols, list)
         self.symbols = symbols
